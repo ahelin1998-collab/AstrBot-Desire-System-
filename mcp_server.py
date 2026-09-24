@@ -5,7 +5,7 @@ import os
 import sys
 from typing import Any
 
-from desire.integration import init_tables, run_tick, get_status_summary
+from desire.integration import init_tables, run_tick, get_status_summary, get_sent_history
 
 class DesireMCPServer:
     def __init__(self):
@@ -34,11 +34,21 @@ class DesireMCPServer:
             },
             {
                 "name": "desire_resolve_thought",
-                "description": "Resolve a thought from the thought pool. Reflection thoughts add a small joy bonus when resolved.",
+                "description": "Resolve a thought from the thought pool.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {"thought_text": {"type": "string", "description": "Full thought text or a keyword contained in the thought."}},
                     "required": ["thought_text"],
+                },
+            },
+            # === 新增：查询最近发过的Bark消息 ===
+            {
+                "name": "desire_sent_history",
+                "description": "View the recent messages you have proactively sent to the user via Bark. Use this to know what you said before.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"limit": {"type": "integer", "description": "How many recent records to view, default 10."}},
+                    "required": [],
                 },
             },
         ]
@@ -52,6 +62,9 @@ class DesireMCPServer:
             result = run_tick(event_type=event_type)
         elif name == "desire_tick":
             result = run_tick()
+        elif name == "desire_sent_history":
+            limit = int(arguments.get("limit", 10))
+            result = get_sent_history(limit)
         elif name == "desire_resolve_thought":
             result = {"error": "resolve_thought 功能在当前版本中不可用"}
         else:
