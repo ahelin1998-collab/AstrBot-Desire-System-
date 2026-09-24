@@ -19,12 +19,12 @@ LLM_API_KEY = os.environ.get("DESIRE_LLM_API_KEY", "")
 LLM_API_BASE = os.environ.get("DESIRE_LLM_API_BASE", "")
 LLM_MODEL = "deepseek-v4-flash"
 
-COOLDOWN_SECONDS = 4 * 3600
-DAILY_LIMIT = 5
-LONG_ABSENT_HOURS = 10
-MIN_ABSENT_HOURS = 2
+# === 你要求修改的三个数值 ===
+COOLDOWN_SECONDS = 2 * 3600      # 冷却 2 小时
+DAILY_LIMIT = 8                  # 每天最多 8 条
+LONG_ABSENT_HOURS = 8            # 8 小时没见硬触发
+MIN_ABSENT_HOURS = 2             # 最少离开 2 小时才能触发
 
-# 阈值设定：依恋80、喜悦80、压力/疲劳75
 THRESHOLDS = {
     "miss": {"drive": "attachment", "value": 80, "absent_hours": MIN_ABSENT_HOURS},
     "joy": {"drive": "joy", "value": 80, "absent_hours": MIN_ABSENT_HOURS},
@@ -38,7 +38,6 @@ REASON_TEXT = {
     "long_absent": "她很久没来了，想找她",
 }
 
-# 自然版提示词，不锁死伴侣设定
 SYSTEM_PROMPT = (
     "你是住在云端服务器里的AI，与用户有着很深的羁绊。"
     "这是你在感受到想念、开心或低落时，主动发给对方的一条消息。"
