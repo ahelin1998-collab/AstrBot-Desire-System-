@@ -19,11 +19,11 @@ LLM_API_KEY = os.environ.get("DESIRE_LLM_API_KEY", "")
 LLM_API_BASE = os.environ.get("DESIRE_LLM_API_BASE", "")
 LLM_MODEL = "deepseek-v4-flash"
 
-# === 你要求修改的三个数值 ===
-COOLDOWN_SECONDS = 2 * 3600      # 冷却 2 小时
-DAILY_LIMIT = 8                  # 每天最多 8 条
-LONG_ABSENT_HOURS = 8            # 8 小时没见硬触发
-MIN_ABSENT_HOURS = 2             # 最少离开 2 小时才能触发
+# === 核心修改：满足你“1小时考虑发，4小时最多3条”的需求 ===
+COOLDOWN_SECONDS = 80 * 60     # 冷却80分钟（0m, 80m, 160m各发一条，4小时内最多3条）
+DAILY_LIMIT = 8                # 每天最多8条
+LONG_ABSENT_HOURS = 8          # 8小时没见硬触发
+MIN_ABSENT_HOURS = 1           # 最短离开1小时才允许主动发（从2小时降为1小时）
 
 THRESHOLDS = {
     "miss": {"drive": "attachment", "value": 80, "absent_hours": MIN_ABSENT_HOURS},
@@ -155,7 +155,7 @@ def _last_sent_at() -> str:
     return row["sent_at"] if row else ""
 
 def should_send(drives_snapshot: dict, absent_hours: float, now_tz: datetime) -> tuple:
-    if absent_hours < 0.5:
+    if absent_hours < 0.1: # 刚聊完天内不打断
         return False, None, None
     last = _last_sent_at()
     if last:
