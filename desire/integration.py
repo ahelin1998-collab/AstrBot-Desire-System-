@@ -3,6 +3,7 @@
 
 import json
 import sqlite3
+import os
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 from .core import DesireState, Drive, Thought, create_default_drives
@@ -12,7 +13,8 @@ from .safety import safety_check
 from .monologue import generate_monologue
 
 TZ_MSK = timezone(timedelta(hours=3))
-DB_PATH = "/AstrBot/data/memory_manager.db"
+# 修复：在 Render 云端自动使用当前目录的数据库文件，不再写死绝对路径
+DB_PATH = os.environ.get("DESIRE_DB_FILE", "desire_system.db")
 
 
 def _get_conn():
