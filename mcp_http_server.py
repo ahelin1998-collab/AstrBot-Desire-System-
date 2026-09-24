@@ -8,12 +8,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 from mcp_server import DesireMCPServer
-from desire.integration import run_tick
+from desire.integration import run_tick, get_sent_history
 from desire.active_send import init_table, should_send, gen_message, record_sent, send_bark_notification, TZ
 
 HOST = os.environ.get("DESIRE_MCP_HOST", "0.0.0.0")
 PORT = int(os.environ.get("PORT", os.environ.get("DESIRE_MCP_PORT", "8765")))
 AUTH_TOKEN = os.environ.get("DESIRE_MCP_TOKEN", "")
+
 
 class DesireMCPHTTPHandler(BaseHTTPRequestHandler):
     server_version = "AstrBotDesireMCP/2.0.1"
@@ -44,8 +45,7 @@ class DesireMCPHTTPHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         path = self.path.rstrip("/")
-        
-        # ================= 新增：主动发送检查接口 =================
+
         if path == "/cron/check":
             async def do_check():
                 init_table()
@@ -53,13 +53,18 @@ class DesireMCPHTTPHandler(BaseHTTPRequestHandler):
                 tick_result = run_tick()
                 drives_snapshot = tick_result.get("drives_snapshot", {})
                 monologue = tick_result.get("monologue", "")
-                
-                # 2. 判断她离开多久了。如果没历史记录，默认按1.5小时算
-                # 这里可以临时用一个固定值，让原本无法发出的消息立刻发出去
-                absent_hours = float(os.environ.get("DESIRE_ABSENT_HOURS", "1.5"))
+
+                # 2. 读取最近3条已发送消息，拼进内心独白
+                history = get_sent_history(3)
+                if history.get("records"):
+                    history_text = "\n".join([f"- {r['sent_at'][:16]}：{r['content']}" for r in history["records"]])
+                    monologue = f"{monologue}\n\n【你最近发过的消息】\n{history_text}" if monologue else f"【你最近发过的消息】\n{history_text}"
+
+                # 3. 判断她离开多久了
+                absent_hours = float(os.environ.get("DESIRE_ABSENT_HOURS", "1"))
                 now_tz = datetime.now(TZ)
-                
-                # 3. 判断是否需要发
+
+                # 4. 判断是否需要发
                 should, reason, template = should_send(drives_snapshot, absent_hours, now_tz)
                 if should:
                     content = await gen_message(reason, drives_snapshot, monologue, absent_hours, now_tz.isoformat())
@@ -71,7 +76,7 @@ class DesireMCPHTTPHandler(BaseHTTPRequestHandler):
                         print(f"[Active Send] Triggered! Reason: {reason} | Content: {content}", flush=True)
                     return True
                 return False
-            
+
             try:
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
@@ -81,7 +86,6 @@ class DesireMCPHTTPHandler(BaseHTTPRequestHandler):
             except Exception as e:
                 self._send_json(500, {"error": str(e)})
             return
-        # ==========================================================
 
         if path not in {"", "/mcp", "/health"}:
             self._send_json(404, {"error": "not found"})
@@ -98,7 +102,8 @@ class DesireMCPHTTPHandler(BaseHTTPRequestHandler):
         self.send_header("Connection", "keep-alive")
         self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
-        event = {"name": "astrbot-desire-system", "version": "2.0.1", "message": "MCP HTTP endpoint is ready."}
+        event = {"name": "astrbot-desire-system", "version": "2.0.1",
+                 "message": "MCP HTTP endpoint is ready."}
         self.wfile.write(f"event: ready\ndata: {json.dumps(event, ensure_ascii=False)}\n\n".encode("utf-8"))
         self.wfile.flush()
 
@@ -119,21 +124,25 @@ class DesireMCPHTTPHandler(BaseHTTPRequestHandler):
                 response = {"jsonrpc": "2.0", "result": None, "id": message.get("id")}
             self._send_json(200, response)
         except Exception as exc:
-            self._send_json(400, {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": str(exc)}})
+            self._send_json(400, {"jsonrpc": "2.0", "id": None,
+                                  "error": {"code": -32700, "message": str(exc)}})
 
     def log_message(self, fmt: str, *args: Any) -> None:
         if os.environ.get("DESIRE_MCP_LOG", ""):
             super().log_message(fmt, *args)
+
 
 class DesireMCPHTTPServer(ThreadingHTTPServer):
     def __init__(self, server_address: tuple[str, int], handler_class: type[BaseHTTPRequestHandler]):
         super().__init__(server_address, handler_class)
         self.mcp = DesireMCPServer()
 
+
 def main() -> None:
     server = DesireMCPHTTPServer((HOST, PORT), DesireMCPHTTPHandler)
     print(f"Server listening on http://{HOST}:{PORT}", flush=True)
     server.serve_forever()
+
 
 if __name__ == "__main__":
     main()
