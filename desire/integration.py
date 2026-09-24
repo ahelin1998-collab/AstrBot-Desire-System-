@@ -189,18 +189,18 @@ def get_status_summary() -> str:
     lines.append(f"\n心跳次数：{state.tick_count}")
     return "\n".join(lines)
 
-# ================= 新增：大模型情感分析并自动触发事件 =================
+# ================= 情感分析并自动触发事件 =================
 def analyze_and_apply(text: str) -> dict:
     """接收用户输入，通过大模型分析语义，自动匹配并触发欲望事件"""
     system_prompt = (
-        "你是一个情感分析器。请阅读用户输入，并从以下事件中选出一个最匹配的返回，只返回事件名称，不要任何多余的字符。\n"
+        "你是一个情感分析器。请阅读用户输入，并从以下事件中选出一个最匹配的返回，只返回事件名称（英文），不要任何多余的字符。\n"
         "可选事件：\n"
-        "wife_message（表达关心、想念、撒娇、或者很久没说话突然找过来）\n"
-        "happy_moment（分享开心的事情）\n"
-        "fight（吵架、生气、责骂）\n"
+        "wife_message（表达关心、想念、撒娇、或者很久没说话突然找过来、表达爱意）\n"
+        "happy_moment（分享开心的事情、喜悦、顺利、高兴）\n"
+        "fight（吵架、生气、责骂、不满）\n"
         "reconcile（和好、道歉、原谅）\n"
-        "rest（感到疲惫、需要休息）\n"
-        "lonely（表达孤独、没人陪）\n"
+        "rest（感到疲惫、好累、困了、需要休息、不想动）\n"
+        "lonely（表达孤独、没人陪、寂寞）\n"
         "如果都不匹配，返回：none"
     )
     try:
@@ -220,6 +220,24 @@ def analyze_and_apply(text: str) -> dict:
         )
         event_type = resp.json()["choices"][0]["message"]["content"].strip().lower()
         event_type = event_type.replace("`", "").replace("'", "").replace('"', "").strip()
+        
+        # === 容错机制：防止大模型返回中文或带修饰词 ===
+        if "wife" in event_type or "想" in event_type or "爱" in event_type:
+            event_type = "wife_message"
+        elif "happy" in event_type or "开心" in event_type or "高兴" in event_type:
+            event_type = "happy_moment"
+        elif "rest" in event_type or "累" in event_type or "疲" in event_type or "困" in event_type:
+            event_type = "rest"
+        elif "fight" in event_type or "吵" in event_type or "气" in event_type:
+            event_type = "fight"
+        elif "reconcile" in event_type or "和好" in event_type or "道歉" in event_type:
+            event_type = "reconcile"
+        elif "lonely" in event_type or "孤独" in event_type or "寂寞" in event_type:
+            event_type = "lonely"
+        else:
+            event_type = "none"
+        # ==========================================
+
     except Exception:
         event_type = "none"
 
