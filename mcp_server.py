@@ -5,12 +5,10 @@ import os
 import sys
 from typing import Any
 
-# 修正导入：不再导入不存在的 DesireEngine，改为导入实际存在的函数
-from desire.integration import init_tables, run_tick, get_status_summary
+from desire.integration import init_tables, run_tick, get_status_summary, analyze_and_apply
 
 class DesireMCPServer:
     def __init__(self):
-        # 初始化数据库表
         init_tables()
 
     def tools(self) -> list[dict[str, Any]]:
@@ -43,21 +41,32 @@ class DesireMCPServer:
                     "required": ["thought_text"],
                 },
             },
+            # === 新增的情感分析工具 ===
+            {
+                "name": "desire_analyze",
+                "description": "Analyze user input and automatically apply the matching emotion event to update drives. Use this tool every time the user sends a chat message.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"text": {"type": "string", "description": "The user's chat message to analyze."}},
+                    "required": ["text"],
+                },
+            },
         ]
 
     def call_tool(self, name: str, arguments: dict[str, Any] | None) -> dict[str, Any]:
         arguments = arguments or {}
-        
-        # 核心逻辑替换：直接调用 functions，不再依赖 engine 对象
         if name == "desire_status":
-            result = get_status_summary()  # 返回状态摘要字符串
+            result = get_status_summary()
         elif name == "desire_event":
             event_type = str(arguments.get("event_type", ""))
-            result = run_tick(event_type=event_type)  # 应用事件并 tick
+            result = run_tick(event_type=event_type)
         elif name == "desire_tick":
-            result = run_tick()  # 单纯执行一次 tick
+            result = run_tick()
+        elif name == "desire_analyze":
+            text = str(arguments.get("text", ""))
+            result = analyze_and_apply(text)
         elif name == "desire_resolve_thought":
-            result = {"error": "resolve_thought 功能在当前版本中不可用"} # 因 integration.py 没提供此函数，直接返回提示
+            result = {"error": "resolve_thought 功能在当前版本中不可用"}
         else:
             raise ValueError(f"Unknown tool: {name}")
             
@@ -116,11 +125,7 @@ def main() -> None:
             message = json.loads(line)
             response = server.handle(message)
         except Exception as exc:
-            response = {
-                "jsonrpc": "2.0",
-                "id": None,
-                "error": {"code": -32700, "message": str(exc)},
-            }
+            response = {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": str(exc)}}
         if response is not None:
             sys.stdout.write(json.dumps(response, ensure_ascii=False) + "\n")
             sys.stdout.flush()
