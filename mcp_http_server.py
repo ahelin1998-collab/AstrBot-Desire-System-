@@ -8,7 +8,8 @@ from typing import Any
 from mcp_server import DesireMCPServer
 
 HOST = os.environ.get("DESIRE_MCP_HOST", "0.0.0.0")
-PORT = int(os.environ.get("DESIRE_MCP_PORT", "8765"))
+# 关键修改：优先读取 Render 自动分配的 PORT 环境变量
+PORT = int(os.environ.get("PORT", os.environ.get("DESIRE_MCP_PORT", "8765")))
 AUTH_TOKEN = os.environ.get("DESIRE_MCP_TOKEN", "")
 
 
