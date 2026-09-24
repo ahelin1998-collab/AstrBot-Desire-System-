@@ -5,7 +5,7 @@ import os
 import sys
 from typing import Any
 
-from desire.integration import init_tables, run_tick, get_status_summary, analyze_and_apply
+from desire.integration import init_tables, run_tick, get_status_summary
 
 class DesireMCPServer:
     def __init__(self):
@@ -41,16 +41,6 @@ class DesireMCPServer:
                     "required": ["thought_text"],
                 },
             },
-            # === 新增的情感分析工具 ===
-            {
-                "name": "desire_analyze",
-                "description": "Analyze user input and automatically apply the matching emotion event to update drives. Use this tool every time the user sends a chat message.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {"text": {"type": "string", "description": "The user's chat message to analyze."}},
-                    "required": ["text"],
-                },
-            },
         ]
 
     def call_tool(self, name: str, arguments: dict[str, Any] | None) -> dict[str, Any]:
@@ -62,9 +52,6 @@ class DesireMCPServer:
             result = run_tick(event_type=event_type)
         elif name == "desire_tick":
             result = run_tick()
-        elif name == "desire_analyze":
-            text = str(arguments.get("text", ""))
-            result = analyze_and_apply(text)
         elif name == "desire_resolve_thought":
             result = {"error": "resolve_thought 功能在当前版本中不可用"}
         else:
