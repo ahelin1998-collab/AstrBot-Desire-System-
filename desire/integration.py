@@ -221,7 +221,7 @@ def analyze_and_apply(text: str) -> dict:
         event_type = resp.json()["choices"][0]["message"]["content"].strip().lower()
         event_type = event_type.replace("`", "").replace("'", "").replace('"', "").strip()
         
-        # === 容错机制：防止大模型返回中文或带修饰词 ===
+        # === 容错机制 ===
         if "wife" in event_type or "想" in event_type or "爱" in event_type:
             event_type = "wife_message"
         elif "happy" in event_type or "开心" in event_type or "高兴" in event_type:
@@ -236,7 +236,7 @@ def analyze_and_apply(text: str) -> dict:
             event_type = "lonely"
         else:
             event_type = "none"
-        # ==========================================
+        # ====================
 
     except Exception:
         event_type = "none"
@@ -253,3 +253,19 @@ def analyze_and_apply(text: str) -> dict:
         "changes": changes,
         "drives_snapshot": {name: round(d.value, 1) for name, d in state.drives.items()}
     }
+
+# ================= 新增：查询最近发送的Bark消息 =================
+def get_sent_history(limit: int = 10) -> dict:
+    """查询最近发送的Bark消息记录"""
+    conn = _get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT sent_at, reason, content FROM desire_active_send ORDER BY id DESC LIMIT ?",
+            (limit,)
+        ).fetchall()
+    except sqlite3.OperationalError:
+        conn.close()
+        return {"count": 0, "records": [], "message": "发送记录表还未创建，可能还没发送过消息"}
+    conn.close()
+    records = [{"sent_at": r["sent_at"], "reason": r["reason"], "content": r["content"]} for r in rows]
+    return {"count": len(records), "records": records}
