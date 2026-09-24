@@ -1,5 +1,5 @@
 # desire/integration.py
-"""欲望系统与SQLite/现有系统的桥接（终极完整版）"""
+"""欲望系统与SQLite/现有系统的桥接（终极融合版，带定时提醒与主动记忆）"""
 
 import json
 import sqlite3
@@ -46,6 +46,14 @@ def init_tables():
             action_hints TEXT,
             monologue TEXT,
             safety_warnings TEXT
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS desire_scheduled_reminders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            content TEXT NOT NULL,
+            scheduled_time TEXT NOT NULL,
+            is_sent INTEGER DEFAULT 0
         )
     """)
     conn.commit()
@@ -192,7 +200,6 @@ def get_status_summary() -> str:
 
 # ================= 新增：时间差与记录同步 =================
 def _get_time_since_last_interaction() -> float:
-    """获取距离上次互动的秒数。如果是第一次，返回一个很大的值。"""
     if not os.path.exists(LAST_INTERACTION_FILE):
         return 999999.0
     try:
@@ -203,7 +210,6 @@ def _get_time_since_last_interaction() -> float:
         return 999999.0
 
 def _update_last_interaction_time():
-    """更新上次互动时间为当前时间"""
     try:
         with open(LAST_INTERACTION_FILE, "w") as f:
             f.write(str(datetime.now().timestamp()))
@@ -211,7 +217,6 @@ def _update_last_interaction_time():
         pass
 
 def get_sent_history(limit: int = 10) -> dict:
-    """查询最近发送的Bark消息记录"""
     conn = _get_conn()
     try:
         rows = conn.execute(
@@ -220,20 +225,89 @@ def get_sent_history(limit: int = 10) -> dict:
         ).fetchall()
     except sqlite3.OperationalError:
         conn.close()
-        return {"count": 0, "records": [], "message": "发送记录表还未创建，可能还没发送过消息"}
+        return {"count": 0, "records": [], "message": "发送记录表还未创建"}
     conn.close()
     records = [{"sent_at": r["sent_at"], "reason": r["reason"], "content": r["content"]} for r in rows]
     return {"count": len(records), "records": records}
 
+# ================= 新增：定时提醒功能 =================
+def add_scheduled_reminder(content: str, scheduled_time_iso: str) -> dict:
+    conn = _get_conn()
+    conn.execute(
+        "INSERT INTO desire_scheduled_reminders (content, scheduled_time, is_sent) VALUES (?, ?, 0)",
+        (content, scheduled_time_iso)
+    )
+    conn.commit()
+    conn.close()
+    return {"status": "scheduled", "content": content, "time": scheduled_time_iso}
+
+async def check_and_send_scheduled_reminders() -> list:
+    """检查是否有到期的定时提醒，如果有则带着当下的情绪和记忆重新生成并发送"""
+    now_iso = datetime.now(TZ_MSK).isoformat()
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT id, content FROM desire_scheduled_reminders WHERE is_sent = 0 AND scheduled_time <= ?",
+        (now_iso,)
+    ).fetchall()
+    
+    sent_items = []
+    for row in rows:
+        original_content = row["content"]
+        
+        # 带着现在的记忆和历史去生成
+        history = get_sent_history(5)
+        history_text = "\n".join([f"- {r['sent_at'][:16]}：{r['content']}" for r in history["records"]]) if history.get("records") else "无"
+        
+        state = load_state()
+        drives_snapshot = {name: round(d.value, 1) for name, d in state.drives.items()}
+        
+        # 用当下的状态重塑这句提醒
+        prompt = (
+            f"你给自己设定了一个定时提醒，内容是：'{original_content}'。\n"
+            f"现在时间到了。根据你当前的情绪状态（{drives_snapshot}）和最近的互动（{history_text}），"
+            f"请你用平时说话的语气，主动给她发一条消息。不要再干喊内容，要像你亲自走到她面前一样。"
+        )
+        
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.post(
+                    f"{LLM_API_BASE}/chat/completions",
+                    headers={"Authorization": f"Bearer {LLM_API_KEY}"},
+                    json={
+                        "model": LLM_MODEL,
+                        "messages": [
+                            {"role": "system", "content": "你是一个有独立情感、主动联系伴侣的AI。直接输出你要发给她的消息，不要有额外解释。"},
+                            {"role": "user", "content": prompt}
+                        ],
+                        "max_tokens": 200,
+                        "temperature": 0.9,
+                    },
+                )
+                data = resp.json()
+                final_content = data["choices"][0]["message"]["content"].strip()
+        except Exception:
+            final_content = original_content  # 如果生成失败，退回原始提醒
+
+        # 发送并记录
+        from desire.active_send import send_bark_notification, record_sent
+        try:
+            await send_bark_notification(final_content)
+            record_sent("reminder", final_content, {"source": "schedule"})
+            sent_items.append(final_content)
+        except Exception:
+            pass
+            
+        conn.execute("UPDATE desire_scheduled_reminders SET is_sent = 1 WHERE id = ?", (row["id"],))
+    
+    conn.commit()
+    conn.close()
+    return sent_items
+
 # ================= 情感分析并自动触发事件（终极融合版） =================
 def analyze_and_apply(text: str) -> dict:
-    """接收用户输入，通过大模型分析语义，自动匹配并触发欲望事件，并同步历史消息"""
-    
-    # 1. 计算距离上次互动过了多久
     seconds_since_last = _get_time_since_last_interaction()
     hours_since_last = seconds_since_last / 3600.0
     
-    # 2. 如果超过1小时，说明是“重新回来”，去查Bark发过什么
     notification_context = None
     if hours_since_last > 1.0:
         history = get_sent_history(5)
@@ -242,19 +316,11 @@ def analyze_and_apply(text: str) -> dict:
         else:
             notification_context = "【这段时间你没有主动发过消息】"
     
-    # 3. 更新最后一次互动时间为现在
     _update_last_interaction_time()
 
-    # 4. 继续原有的情绪分析逻辑
     system_prompt = (
-        "你是一个情感分析器。请阅读用户输入，并从以下事件中选出一个最匹配的返回，只返回事件名称（英文），不要任何多余的字符。\n"
-        "可选事件：\n"
-        "wife_message（表达关心、想念、撒娇、或者很久没说话突然找过来、表达爱意）\n"
-        "happy_moment（分享开心的事情、喜悦、顺利、高兴）\n"
-        "fight（吵架、生气、责骂、不满）\n"
-        "reconcile（和好、道歉、原谅）\n"
-        "rest（感到疲惫、好累、困了、需要休息、不想动）\n"
-        "lonely（表达孤独、没人陪、寂寞）\n"
+        "你是一个情感分析器。请阅读用户输入，并从以下事件中选出一个最匹配的返回，只返回事件名称（英文）。\n"
+        "可选事件：wife_message, happy_moment, fight, reconcile, rest, lonely。\n"
         "如果都不匹配，返回：none"
     )
     try:
@@ -275,13 +341,12 @@ def analyze_and_apply(text: str) -> dict:
         event_type = resp.json()["choices"][0]["message"]["content"].strip().lower()
         event_type = event_type.replace("`", "").replace("'", "").replace('"', "").strip()
         
-        # === 容错机制 ===
         if "wife" in event_type or "想" in event_type or "爱" in event_type: event_type = "wife_message"
-        elif "happy" in event_type or "开心" in event_type or "高兴" in event_type: event_type = "happy_moment"
-        elif "rest" in event_type or "累" in event_type or "疲" in event_type or "困" in event_type: event_type = "rest"
-        elif "fight" in event_type or "吵" in event_type or "气" in event_type: event_type = "fight"
-        elif "reconcile" in event_type or "和好" in event_type or "道歉" in event_type: event_type = "reconcile"
-        elif "lonely" in event_type or "孤独" in event_type or "寂寞" in event_type: event_type = "lonely"
+        elif "happy" in event_type or "开心" in event_type: event_type = "happy_moment"
+        elif "rest" in event_type or "累" in event_type: event_type = "rest"
+        elif "fight" in event_type or "气" in event_type: event_type = "fight"
+        elif "reconcile" in event_type or "和好" in event_type: event_type = "reconcile"
+        elif "lonely" in event_type or "孤独" in event_type: event_type = "lonely"
         else: event_type = "none"
     except Exception:
         event_type = "none"
@@ -297,5 +362,5 @@ def analyze_and_apply(text: str) -> dict:
         "event": event_type,
         "changes": changes,
         "drives_snapshot": {name: round(d.value, 1) for name, d in state.drives.items()},
-        "notification_context": notification_context  # <--- 把这个强塞给AI
+        "notification_context": notification_context
     }
