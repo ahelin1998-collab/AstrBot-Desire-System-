@@ -5,61 +5,41 @@ import os
 import sys
 from typing import Any
 
-from desire.integration import DesireEngine
-
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_FILE = os.environ.get("DESIRE_DB_FILE") or os.path.join(BASE_DIR, "desire_system.db")
-
+# 修正导入：不再导入不存在的 DesireEngine，改为导入实际存在的函数
+from desire.integration import init_tables, run_tick, get_status_summary
 
 class DesireMCPServer:
     def __init__(self):
-        self.engine = DesireEngine(DB_FILE)
+        # 初始化数据库表
+        init_tables()
 
     def tools(self) -> list[dict[str, Any]]:
         return [
             {
                 "name": "desire_status",
                 "description": "View the current nine-dimensional desire drive state, thoughts, tick count, and baselines.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {},
-                    "required": [],
-                },
+                "inputSchema": {"type": "object", "properties": {}, "required": []},
             },
             {
                 "name": "desire_event",
                 "description": "Trigger a desire system event such as wife_message, task_done, fight, reconcile, rest, or happy_moment.",
                 "inputSchema": {
                     "type": "object",
-                    "properties": {
-                        "event_type": {
-                            "type": "string",
-                            "description": "Event type to apply.",
-                        }
-                    },
+                    "properties": {"event_type": {"type": "string", "description": "Event type to apply."}},
                     "required": ["event_type"],
                 },
             },
             {
                 "name": "desire_tick",
                 "description": "Run one desire system heartbeat and return changes, action hints, next interval, and monologue.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {},
-                    "required": [],
-                },
+                "inputSchema": {"type": "object", "properties": {}, "required": []},
             },
             {
                 "name": "desire_resolve_thought",
                 "description": "Resolve a thought from the thought pool. Reflection thoughts add a small joy bonus when resolved.",
                 "inputSchema": {
                     "type": "object",
-                    "properties": {
-                        "thought_text": {
-                            "type": "string",
-                            "description": "Full thought text or a keyword contained in the thought.",
-                        }
-                    },
+                    "properties": {"thought_text": {"type": "string", "description": "Full thought text or a keyword contained in the thought."}},
                     "required": ["thought_text"],
                 },
             },
@@ -67,20 +47,20 @@ class DesireMCPServer:
 
     def call_tool(self, name: str, arguments: dict[str, Any] | None) -> dict[str, Any]:
         arguments = arguments or {}
-        # Desktop/mobile MCP processes may sleep or be recreated between calls.
-        # Reconcile elapsed heartbeats before every observable operation.
-        if name != "desire_tick":
-            self.engine.tick_if_due()
+        
+        # 核心逻辑替换：直接调用 functions，不再依赖 engine 对象
         if name == "desire_status":
-            result = self.engine.summary(catch_up=False)
+            result = get_status_summary()  # 返回状态摘要字符串
         elif name == "desire_event":
-            result = self.engine.trigger_event(str(arguments.get("event_type", "")))
+            event_type = str(arguments.get("event_type", ""))
+            result = run_tick(event_type=event_type)  # 应用事件并 tick
         elif name == "desire_tick":
-            result = self.engine.tick()
+            result = run_tick()  # 单纯执行一次 tick
         elif name == "desire_resolve_thought":
-            result = self.engine.resolve(str(arguments.get("thought_text", "")))
+            result = {"error": "resolve_thought 功能在当前版本中不可用"} # 因 integration.py 没提供此函数，直接返回提示
         else:
             raise ValueError(f"Unknown tool: {name}")
+            
         return {
             "content": [
                 {
@@ -126,7 +106,6 @@ class DesireMCPServer:
             "error": {"code": -32601, "message": f"Method not found: {method}"},
         }
 
-
 def main() -> None:
     server = DesireMCPServer()
     for line in sys.stdin:
@@ -145,7 +124,6 @@ def main() -> None:
         if response is not None:
             sys.stdout.write(json.dumps(response, ensure_ascii=False) + "\n")
             sys.stdout.flush()
-
 
 if __name__ == "__main__":
     main()
