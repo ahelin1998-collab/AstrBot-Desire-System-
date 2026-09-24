@@ -19,11 +19,11 @@ LLM_API_KEY = os.environ.get("DESIRE_LLM_API_KEY", "")
 LLM_API_BASE = os.environ.get("DESIRE_LLM_API_BASE", "")
 LLM_MODEL = "deepseek-v4-flash"
 
-# === 核心修改：满足你“1小时考虑发，4小时最多3条”的需求 ===
-COOLDOWN_SECONDS = 80 * 60     # 冷却80分钟（0m, 80m, 160m各发一条，4小时内最多3条）
+# === 优化后的参数 ===
+COOLDOWN_SECONDS = 45 * 60     # 冷却45分钟
 DAILY_LIMIT = 8                # 每天最多8条
 LONG_ABSENT_HOURS = 8          # 8小时没见硬触发
-MIN_ABSENT_HOURS = 1           # 最短离开1小时才允许主动发（从2小时降为1小时）
+MIN_ABSENT_HOURS = 0.5         # 最短离开0.5小时（半小时）
 
 THRESHOLDS = {
     "miss": {"drive": "attachment", "value": 80, "absent_hours": MIN_ABSENT_HOURS},
