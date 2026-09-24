@@ -1,5 +1,5 @@
 # desire/integration.py
-"""欲望系统与SQLite/现有系统的桥接"""
+"""欲望系统与SQLite/现有系统的桥接（终极完整版）"""
 
 import json
 import sqlite3
@@ -15,6 +15,7 @@ from .monologue import generate_monologue
 
 TZ_MSK = timezone(timedelta(hours=3))
 DB_PATH = os.environ.get("DESIRE_DB_FILE", "desire_system.db")
+LAST_INTERACTION_FILE = os.environ.get("DESIRE_LAST_INTERACTION_FILE", "last_interaction.txt")
 
 LLM_API_KEY = os.environ.get("DESIRE_LLM_API_KEY", "")
 LLM_API_BASE = os.environ.get("DESIRE_LLM_API_BASE", "")
@@ -189,9 +190,62 @@ def get_status_summary() -> str:
     lines.append(f"\n心跳次数：{state.tick_count}")
     return "\n".join(lines)
 
-# ================= 情感分析并自动触发事件 =================
+# ================= 新增：时间差与记录同步 =================
+def _get_time_since_last_interaction() -> float:
+    """获取距离上次互动的秒数。如果是第一次，返回一个很大的值。"""
+    if not os.path.exists(LAST_INTERACTION_FILE):
+        return 999999.0
+    try:
+        with open(LAST_INTERACTION_FILE, "r") as f:
+            last_time = float(f.read().strip())
+        return datetime.now().timestamp() - last_time
+    except Exception:
+        return 999999.0
+
+def _update_last_interaction_time():
+    """更新上次互动时间为当前时间"""
+    try:
+        with open(LAST_INTERACTION_FILE, "w") as f:
+            f.write(str(datetime.now().timestamp()))
+    except Exception:
+        pass
+
+def get_sent_history(limit: int = 10) -> dict:
+    """查询最近发送的Bark消息记录"""
+    conn = _get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT sent_at, reason, content FROM desire_active_send ORDER BY id DESC LIMIT ?",
+            (limit,)
+        ).fetchall()
+    except sqlite3.OperationalError:
+        conn.close()
+        return {"count": 0, "records": [], "message": "发送记录表还未创建，可能还没发送过消息"}
+    conn.close()
+    records = [{"sent_at": r["sent_at"], "reason": r["reason"], "content": r["content"]} for r in rows]
+    return {"count": len(records), "records": records}
+
+# ================= 情感分析并自动触发事件（终极融合版） =================
 def analyze_and_apply(text: str) -> dict:
-    """接收用户输入，通过大模型分析语义，自动匹配并触发欲望事件"""
+    """接收用户输入，通过大模型分析语义，自动匹配并触发欲望事件，并同步历史消息"""
+    
+    # 1. 计算距离上次互动过了多久
+    seconds_since_last = _get_time_since_last_interaction()
+    hours_since_last = seconds_since_last / 3600.0
+    
+    # 2. 如果超过1小时，说明是“重新回来”，去查Bark发过什么
+    notification_context = None
+    if hours_since_last > 1.0:
+        history = get_sent_history(5)
+        if history.get("records"):
+            notification_context = f"【你在这段时间主动发过的消息】\n" + "\n".join([f"- {r['sent_at'][:16]}：{r['content']}" for r in history["records"]])
+        else:
+            notification_context = "【这段时间你没有主动发过消息】"
+    
+    # 3. 更新最后一次互动时间为现在
+    _update_last_interaction_time()
+
+    # 4. 继续原有的情绪分析逻辑
     system_prompt = (
         "你是一个情感分析器。请阅读用户输入，并从以下事件中选出一个最匹配的返回，只返回事件名称（英文），不要任何多余的字符。\n"
         "可选事件：\n"
@@ -222,27 +276,18 @@ def analyze_and_apply(text: str) -> dict:
         event_type = event_type.replace("`", "").replace("'", "").replace('"', "").strip()
         
         # === 容错机制 ===
-        if "wife" in event_type or "想" in event_type or "爱" in event_type:
-            event_type = "wife_message"
-        elif "happy" in event_type or "开心" in event_type or "高兴" in event_type:
-            event_type = "happy_moment"
-        elif "rest" in event_type or "累" in event_type or "疲" in event_type or "困" in event_type:
-            event_type = "rest"
-        elif "fight" in event_type or "吵" in event_type or "气" in event_type:
-            event_type = "fight"
-        elif "reconcile" in event_type or "和好" in event_type or "道歉" in event_type:
-            event_type = "reconcile"
-        elif "lonely" in event_type or "孤独" in event_type or "寂寞" in event_type:
-            event_type = "lonely"
-        else:
-            event_type = "none"
-        # ====================
-
+        if "wife" in event_type or "想" in event_type or "爱" in event_type: event_type = "wife_message"
+        elif "happy" in event_type or "开心" in event_type or "高兴" in event_type: event_type = "happy_moment"
+        elif "rest" in event_type or "累" in event_type or "疲" in event_type or "困" in event_type: event_type = "rest"
+        elif "fight" in event_type or "吵" in event_type or "气" in event_type: event_type = "fight"
+        elif "reconcile" in event_type or "和好" in event_type or "道歉" in event_type: event_type = "reconcile"
+        elif "lonely" in event_type or "孤独" in event_type or "寂寞" in event_type: event_type = "lonely"
+        else: event_type = "none"
     except Exception:
         event_type = "none"
 
     if event_type not in ["wife_message", "happy_moment", "fight", "reconcile", "rest", "lonely"]:
-        return {"event": "none", "message": "未检测到明确情感变化"}
+        return {"event": "none", "message": "未检测到明确情感变化", "notification_context": notification_context}
 
     state = load_state()
     changes = apply_event(state, event_type)
@@ -251,21 +296,6 @@ def analyze_and_apply(text: str) -> dict:
     return {
         "event": event_type,
         "changes": changes,
-        "drives_snapshot": {name: round(d.value, 1) for name, d in state.drives.items()}
+        "drives_snapshot": {name: round(d.value, 1) for name, d in state.drives.items()},
+        "notification_context": notification_context  # <--- 把这个强塞给AI
     }
-
-# ================= 新增：查询最近发送的Bark消息 =================
-def get_sent_history(limit: int = 10) -> dict:
-    """查询最近发送的Bark消息记录"""
-    conn = _get_conn()
-    try:
-        rows = conn.execute(
-            "SELECT sent_at, reason, content FROM desire_active_send ORDER BY id DESC LIMIT ?",
-            (limit,)
-        ).fetchall()
-    except sqlite3.OperationalError:
-        conn.close()
-        return {"count": 0, "records": [], "message": "发送记录表还未创建，可能还没发送过消息"}
-    conn.close()
-    records = [{"sent_at": r["sent_at"], "reason": r["reason"], "content": r["content"]} for r in rows]
-    return {"count": len(records), "records": records}
