@@ -57,29 +57,28 @@ class DesireState:
 
 
 def create_default_drives() -> Dict[str, Drive]:
-    """创建默认十一维度（含孤独）"""
+    """创建默认十一维度（含孤独）——所有 growth_rate 归零，防止无限自涨"""
     return {
         "attachment": Drive(name="attachment", value=60.0, baseline=60.0,
-                            growth_rate=0.2, decay_rate=0.1, action_threshold=70.0),
+                            growth_rate=0.0, decay_rate=0.1, action_threshold=70.0),
         "curiosity": Drive(name="curiosity", value=40.0, baseline=40.0,
-                           growth_rate=0.2, decay_rate=0.1, action_threshold=60.0),
+                           growth_rate=0.0, decay_rate=0.1, action_threshold=60.0),
         "reflection": Drive(name="reflection", value=30.0, baseline=30.0,
-                            growth_rate=0.15, decay_rate=0.2, action_threshold=50.0),
+                            growth_rate=0.0, decay_rate=0.2, action_threshold=50.0),
         "duty": Drive(name="duty", value=40.0, baseline=40.0,
-                      growth_rate=0.1, decay_rate=0.2, action_threshold=70.0),
+                      growth_rate=0.0, decay_rate=0.2, action_threshold=70.0),
         "social": Drive(name="social", value=30.0, baseline=30.0,
-                        growth_rate=0.1, decay_rate=0.15, action_threshold=60.0),
+                        growth_rate=0.0, decay_rate=0.15, action_threshold=60.0),
         "fatigue": Drive(name="fatigue", value=20.0, baseline=20.0,
                          growth_rate=0.0, decay_rate=0.3, action_threshold=80.0),
         "intimacy": Drive(name="intimacy", value=40.0, baseline=40.0,
-                          growth_rate=0.1, decay_rate=0.15, action_threshold=70.0),
+                          growth_rate=0.0, decay_rate=0.15, action_threshold=70.0),
         "stress": Drive(name="stress", value=20.0, baseline=20.0,
                         growth_rate=0.0, decay_rate=0.2, action_threshold=80.0),
         "joy": Drive(name="joy", value=50.0, baseline=50.0,
                      growth_rate=0.0, decay_rate=0.15, action_threshold=80.0),
         "obsession": Drive(name="obsession", value=20.0, baseline=20.0,
                            growth_rate=0.0, decay_rate=0.1, action_threshold=85.0),
-        # 孤独：基线15，阈值70，不自然衰减（它只在用户回来时才降）
         "lonely": Drive(name="lonely", value=15.0, baseline=15.0,
                         growth_rate=0.0, decay_rate=0.0, action_threshold=70.0),
     }
@@ -128,7 +127,7 @@ def _damping_multiplier(state: DesireState, drive_name: str, delta: float) -> fl
 
 
 def apply_event(state: DesireState, event_type: str, intensity: float = 5.0) -> List[str]:
-    """应用事件到驱动条。intensity: 1-10。"""
+    """应用事件到驱动条。intensity: 1-10，由 AI 判断冲击有多大。"""
     effects = EVENT_EFFECTS.get(event_type, {})
     changes = []
     intensity_multiplier = max(0.2, min(3.0, intensity / 3.0))
@@ -137,18 +136,18 @@ def apply_event(state: DesireState, event_type: str, intensity: float = 5.0) -> 
         if drive_name in state.drives:
             damping = _damping_multiplier(state, drive_name, delta)
             actual_delta = delta * intensity_multiplier * damping
-            
+
             if actual_delta > 0:
                 actual_delta = min(actual_delta, 10.0)
             else:
                 actual_delta = max(actual_delta, -12.0)
-            
+
             old = state.drives[drive_name].value
             state.drives[drive_name].value += actual_delta
             state.drives[drive_name].clamp()
             new = state.drives[drive_name].value
-            
+
             if abs(new - old) > 0.1:
                 changes.append(f"{drive_name}: {old:.0f} → {new:.0f}")
-    
+
     return changes
