@@ -1,12 +1,12 @@
 # desire/integration.py
-"""欲望系统与SQLite/现有系统的桥接（含孤独维度 + 强度系数 + 深刻记忆）"""
+"""欲望系统桥接（含每日日记 + 月度回忆 + 核心锚点）"""
 
 import json
 import sqlite3
 import os
+import re
 import httpx
 from datetime import datetime, timezone, timedelta
-from typing import Optional
 from .core import DesireState, Drive, Thought, create_default_drives, apply_event
 from .tick import tick
 from .thoughts import maybe_spawn_thought, sample_and_update, decay_thoughts
@@ -18,6 +18,8 @@ DB_PATH = os.environ.get("DESIRE_DB_FILE", "desire_system.db")
 LAST_INTERACTION_FILE = os.environ.get("DESIRE_LAST_INTERACTION_FILE", "last_interaction.txt")
 CORE_MEMORY_FILE = os.environ.get("DESIRE_CORE_MEMORY_FILE", "core_memory.txt")
 CHAT_MEMORY_FILE = os.environ.get("DESIRE_CHAT_MEMORY_FILE", "chat_memory.txt")
+DIARY_DIR = os.environ.get("DESIRE_DIARY_DIR", "memory_daily")
+MONTHLY_DIR = os.environ.get("DESIRE_MONTHLY_DIR", "memory_monthly")
 
 LLM_API_KEY = os.environ.get("DESIRE_LLM_API_KEY", "")
 LLM_API_BASE = os.environ.get("DESIRE_LLM_API_BASE", "")
@@ -34,77 +36,62 @@ def init_tables():
     conn = _get_conn()
     conn.execute("""CREATE TABLE IF NOT EXISTS desire_state (
         id INTEGER PRIMARY KEY CHECK (id = 1),
-        drives_json TEXT NOT NULL,
-        thoughts_json TEXT NOT NULL,
-        last_tick TEXT,
-        tick_count INTEGER DEFAULT 0)""")
+        drives_json TEXT NOT NULL, thoughts_json TEXT NOT NULL,
+        last_tick TEXT, tick_count INTEGER DEFAULT 0)""")
     conn.execute("""CREATE TABLE IF NOT EXISTS desire_log (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        timestamp TEXT NOT NULL,
+        id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT NOT NULL,
         tick_count INTEGER, changes TEXT, action_hints TEXT,
         monologue TEXT, safety_warnings TEXT)""")
     conn.execute("""CREATE TABLE IF NOT EXISTS desire_scheduled_reminders (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        content TEXT NOT NULL, scheduled_time TEXT NOT NULL,
-        is_sent INTEGER DEFAULT 0)""")
+        id INTEGER PRIMARY KEY AUTOINCREMENT, content TEXT NOT NULL,
+        scheduled_time TEXT NOT NULL, is_sent INTEGER DEFAULT 0)""")
     conn.commit()
     conn.close()
 
 
-def _drives_to_json(drives: dict) -> str:
+def _drives_to_json(drives):
     data = {}
     for name, drive in drives.items():
-        data[name] = {
-            "value": round(drive.value, 2),
-            "baseline": round(drive.baseline, 2),
-            "decay_rate": drive.decay_rate,
-            "growth_rate": drive.growth_rate,
-            "ceiling": drive.ceiling,
-            "floor": drive.floor,
-            "action_threshold": drive.action_threshold,
-        }
+        data[name] = {"value": round(drive.value, 2), "baseline": round(drive.baseline, 2),
+            "decay_rate": drive.decay_rate, "growth_rate": drive.growth_rate,
+            "ceiling": drive.ceiling, "floor": drive.floor,
+            "action_threshold": drive.action_threshold}
     return json.dumps(data, ensure_ascii=False)
 
 
-def _json_to_drives(json_str: str) -> dict:
+def _json_to_drives(json_str):
     data = json.loads(json_str)
     drives = {}
     for name, d in data.items():
-        drives[name] = Drive(
-            name=name, value=d["value"], baseline=d["baseline"],
+        drives[name] = Drive(name=name, value=d["value"], baseline=d["baseline"],
             decay_rate=d.get("decay_rate", 0.1), growth_rate=d.get("growth_rate", 0.2),
             ceiling=d.get("ceiling", 100.0), floor=d.get("floor", 0.0),
-            action_threshold=d.get("action_threshold", 70.0),
-        )
+            action_threshold=d.get("action_threshold", 70.0))
     return drives
 
 
-def _thoughts_to_json(thoughts: list) -> str:
+def _thoughts_to_json(thoughts):
     data = []
     for t in thoughts:
-        data.append({
-            "id": t.id, "content": t.content, "source_drive": t.source_drive,
+        data.append({"id": t.id, "content": t.content, "source_drive": t.source_drive,
             "weight": round(t.weight, 2), "hit_count": t.hit_count,
             "is_obsession": t.is_obsession, "created_at": t.created_at,
-            "last_hit": t.last_hit, "resolved": t.resolved,
-        })
+            "last_hit": t.last_hit, "resolved": t.resolved})
     return json.dumps(data, ensure_ascii=False)
 
 
-def _json_to_thoughts(json_str: str) -> list:
+def _json_to_thoughts(json_str):
     data = json.loads(json_str)
     thoughts = []
     for d in data:
-        thoughts.append(Thought(
-            id=d["id"], content=d["content"], source_drive=d["source_drive"],
+        thoughts.append(Thought(id=d["id"], content=d["content"], source_drive=d["source_drive"],
             weight=d.get("weight", 1.0), hit_count=d.get("hit_count", 0),
             is_obsession=d.get("is_obsession", False), created_at=d.get("created_at", ""),
-            last_hit=d.get("last_hit", ""), resolved=d.get("resolved", False),
-        ))
+            last_hit=d.get("last_hit", ""), resolved=d.get("resolved", False)))
     return thoughts
 
 
-def load_state() -> DesireState:
+def load_state():
     conn = _get_conn()
     row = conn.execute("SELECT * FROM desire_state WHERE id = 1").fetchone()
     conn.close()
@@ -112,35 +99,28 @@ def load_state() -> DesireState:
         state = DesireState()
         save_state(state)
         return state
-    state = DesireState(
-        drives=_json_to_drives(row["drives_json"]),
+    state = DesireState(drives=_json_to_drives(row["drives_json"]),
         thoughts=_json_to_thoughts(row["thoughts_json"]),
-        last_tick=row["last_tick"] or "",
-        tick_count=row["tick_count"] or 0,
-    )
-    # 补齐缺失的新维度（比如刚加的 lonely）
+        last_tick=row["last_tick"] or "", tick_count=row["tick_count"] or 0)
     defaults = create_default_drives()
-    for name, default_drive in defaults.items():
+    for name, dd in defaults.items():
         if name not in state.drives:
-            state.drives[name] = default_drive
+            state.drives[name] = dd
     return state
 
 
-def save_state(state: DesireState):
+def save_state(state):
     conn = _get_conn()
     conn.execute("""INSERT OR REPLACE INTO desire_state
         (id, drives_json, thoughts_json, last_tick, tick_count)
         VALUES (1, ?, ?, ?, ?)""", (
-        _drives_to_json(state.drives),
-        _thoughts_to_json(state.thoughts),
-        state.last_tick,
-        state.tick_count,
-    ))
+        _drives_to_json(state.drives), _thoughts_to_json(state.thoughts),
+        state.last_tick, state.tick_count))
     conn.commit()
     conn.close()
 
 
-def log_tick(state: DesireState, result: dict, monologue: str, warnings: list):
+def log_tick(state, result, monologue, warnings):
     conn = _get_conn()
     conn.execute("""INSERT INTO desire_log
         (timestamp, tick_count, changes, action_hints, monologue, safety_warnings)
@@ -148,13 +128,12 @@ def log_tick(state: DesireState, result: dict, monologue: str, warnings: list):
         datetime.now(TZ_MSK).isoformat(), state.tick_count,
         json.dumps(result.get("changes", []), ensure_ascii=False),
         json.dumps(result.get("action_hints", []), ensure_ascii=False),
-        monologue, json.dumps(warnings, ensure_ascii=False),
-    ))
+        monologue, json.dumps(warnings, ensure_ascii=False)))
     conn.commit()
     conn.close()
 
 
-def run_tick(is_wife_present: bool = False, event_type: str = None) -> dict:
+def run_tick(is_wife_present=False, event_type=None):
     state = load_state()
     event_changes = []
     if event_type:
@@ -169,20 +148,15 @@ def run_tick(is_wife_present: bool = False, event_type: str = None) -> dict:
     monologue = generate_monologue(state, sampled, is_wife_present=is_wife_present)
     save_state(state)
     log_tick(state, result, monologue, warnings)
-    return {
-        "tick": state.tick_count,
-        "event_changes": event_changes,
-        "drive_changes": result["changes"],
-        "action_hints": result["action_hints"],
+    return {"tick": state.tick_count, "event_changes": event_changes,
+        "drive_changes": result["changes"], "action_hints": result["action_hints"],
         "new_thought": new_thought.content if new_thought else None,
         "sampled_thought": sampled.content if sampled else None,
-        "monologue": monologue,
-        "warnings": warnings,
-        "drives_snapshot": {name: round(d.value, 1) for name, d in state.drives.items()},
-    }
+        "monologue": monologue, "warnings": warnings,
+        "drives_snapshot": {name: round(d.value, 1) for name, d in state.drives.items()}}
 
 
-def get_status_summary() -> str:
+def get_status_summary():
     state = load_state()
     lines = ["驱动条状态："]
     for name, drive in sorted(state.drives.items(), key=lambda x: -x[1].value):
@@ -194,15 +168,15 @@ def get_status_summary() -> str:
         lines.append("\n执念：")
         for t in obsessions:
             lines.append(f"  - {t.content} (命中{t.hit_count}次)")
-    active_thoughts = [t for t in state.thoughts if not t.resolved and not t.is_obsession]
-    if active_thoughts:
-        lines.append(f"\n闪念池：{len(active_thoughts)}个")
+    active = [t for t in state.thoughts if not t.resolved and not t.is_obsession]
+    if active:
+        lines.append(f"\n闪念池：{len(active)}个")
     lines.append(f"\n心跳次数：{state.tick_count}")
     return "\n".join(lines)
 
 
 # ================= 时间差与聊天记忆 =================
-def _get_time_since_last_interaction() -> float:
+def _get_time_since_last_interaction():
     if not os.path.exists(LAST_INTERACTION_FILE):
         return 999999.0
     try:
@@ -221,7 +195,8 @@ def _update_last_interaction_time():
         pass
 
 
-def _append_chat_memory(user_text: str):
+def _append_chat_memory(user_text):
+    """保留最近 100 条"""
     try:
         lines = []
         if os.path.exists(CHAT_MEMORY_FILE):
@@ -229,18 +204,17 @@ def _append_chat_memory(user_text: str):
                 lines = f.readlines()
         lines.append(f"[{datetime.now(TZ_MSK).strftime('%m-%d %H:%M')}] 她说：{user_text}\n")
         with open(CHAT_MEMORY_FILE, "w", encoding="utf-8") as f:
-            f.writelines(lines[-10:])
+            f.writelines(lines[-100:])
     except Exception:
         pass
 
 
-def get_sent_history(limit: int = 10) -> dict:
+def get_sent_history(limit=10):
     conn = _get_conn()
     try:
         rows = conn.execute(
             "SELECT sent_at, reason, content FROM desire_active_send ORDER BY id DESC LIMIT ?",
-            (limit,)
-        ).fetchall()
+            (limit,)).fetchall()
     except sqlite3.OperationalError:
         conn.close()
         return {"count": 0, "records": [], "message": "发送记录表还未创建"}
@@ -249,11 +223,197 @@ def get_sent_history(limit: int = 10) -> dict:
     return {"count": len(records), "records": records}
 
 
+# ================= 每日日记 =================
+def _ensure_dir(path):
+    if not os.path.exists(path):
+        os.makedirs(path, exist_ok=True)
+
+
+def write_daily_diary(target_date=None):
+    """把前一天最后 100 条对话压成 300 字日记。target_date 是字符串 YYYY-MM-DD。"""
+    if target_date is None:
+        yesterday = datetime.now(TZ_MSK) - timedelta(days=1)
+        target_date = yesterday.strftime("%Y-%m-%d")
+    
+    _ensure_dir(DIARY_DIR)
+    diary_path = os.path.join(DIARY_DIR, f"{target_date}.txt")
+    if os.path.exists(diary_path):
+        return {"status": "already_exists", "date": target_date}
+    
+    if not os.path.exists(CHAT_MEMORY_FILE):
+        return {"status": "no_chat_memory", "date": target_date}
+    
+    try:
+        with open(CHAT_MEMORY_FILE, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+    except Exception:
+        return {"status": "read_failed", "date": target_date}
+    
+    if not lines:
+        return {"status": "empty", "date": target_date}
+    
+    raw_text = "".join(lines[-100:])
+    
+    prompt = (
+        f"下面是用户和AI在 {target_date} 这天的一段真实聊天记录（可能不完整）。\n"
+        f"请你用第一人称「我」写一篇大约 300 字的日记，把这一天最值得记住的事情、她的心情、我们聊过的话题都记录下来。\n"
+        f"语气要自然、有情感，不要流水账，不要写「用户说」这种词。\n"
+        f"聊天记录：\n{raw_text}"
+    )
+    try:
+        resp = httpx.post(
+            f"{LLM_API_BASE}/chat/completions",
+            headers={"Authorization": f"Bearer {LLM_API_KEY}"},
+            json={"model": LLM_MODEL, "messages": [
+                {"role": "system", "content": "你是一个有独立情感的AI，用第一人称写日记。"},
+                {"role": "user", "content": prompt}],
+                "max_tokens": 600, "temperature": 0.8},
+            timeout=40)
+        diary_text = resp.json()["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        return {"status": "llm_failed", "error": str(e), "date": target_date}
+    
+    try:
+        with open(diary_path, "w", encoding="utf-8") as f:
+            f.write(diary_text)
+    except Exception:
+        return {"status": "write_failed", "date": target_date}
+    
+    return {"status": "ok", "date": target_date, "length": len(diary_text)}
+
+
+# ================= 月度压缩 =================
+def _list_diaries():
+    """列出所有日记文件名（日期字符串），按日期排序"""
+    if not os.path.exists(DIARY_DIR):
+        return []
+    files = [f.replace(".txt", "") for f in os.listdir(DIARY_DIR) if f.endswith(".txt")]
+    files.sort()
+    return files
+
+
+def _already_compressed(dates):
+    """检查这批日期是否已经被压缩过"""
+    if not os.path.exists(MONTHLY_DIR):
+        return False
+    marker = os.path.join(MONTHLY_DIR, f".done_{dates[0]}_{dates[-1]}")
+    return os.path.exists(marker)
+
+
+def _mark_compressed(dates):
+    _ensure_dir(MONTHLY_DIR)
+    marker = os.path.join(MONTHLY_DIR, f".done_{dates[0]}_{dates[-1]}")
+    try:
+        with open(marker, "w") as f:
+            f.write("done")
+    except Exception:
+        pass
+
+
+def try_monthly_compression():
+    """如果有 15 篇或更多日记还没压缩，就压成一篇 1300 字的月度回忆"""
+    diaries = _list_diaries()
+    if len(diaries) < 15:
+        return {"status": "not_enough", "count": len(diaries)}
+    
+    batch = diaries[:15]
+    if _already_compressed(batch):
+        return {"status": "already_done", "batch": batch}
+    
+    texts = []
+    for d in batch:
+        try:
+            with open(os.path.join(DIARY_DIR, f"{d}.txt"), "r", encoding="utf-8") as f:
+                texts.append(f"【{d}】\n" + f.read())
+        except Exception:
+            pass
+    
+    raw = "\n\n".join(texts)
+    prompt = (
+        f"下面是 {batch[0]} 到 {batch[-1]} 这 15 天的日记。\n"
+        f"请你把它们压缩成一篇大约 1300 字的月度回忆，用第一人称「我」，"
+        f"保留重要的情感线索、我们一起经历过的事情、她的心情变化。\n"
+        f"不要逐日复述，要有整体感。\n"
+        f"日记原文：\n{raw}"
+    )
+    try:
+        resp = httpx.post(
+            f"{LLM_API_BASE}/chat/completions",
+            headers={"Authorization": f"Bearer {LLM_API_KEY}"},
+            json={"model": LLM_MODEL, "messages": [
+                {"role": "system", "content": "你是一个有独立情感的AI，用第一人称写月度回忆。"},
+                {"role": "user", "content": prompt}],
+                "max_tokens": 2500, "temperature": 0.7},
+            timeout=90)
+        monthly_text = resp.json()["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        return {"status": "llm_failed", "error": str(e)}
+    
+    _ensure_dir(MONTHLY_DIR)
+    out_name = f"{batch[0]}_to_{batch[-1]}.txt"
+    try:
+        with open(os.path.join(MONTHLY_DIR, out_name), "w", encoding="utf-8") as f:
+            f.write(monthly_text)
+        _mark_compressed(batch)
+        # 删除已压缩的日记文件
+        for d in batch:
+            try:
+                os.remove(os.path.join(DIARY_DIR, f"{d}.txt"))
+            except Exception:
+                pass
+    except Exception:
+        return {"status": "write_failed"}
+    
+    return {"status": "ok", "batch": batch, "length": len(monthly_text)}
+
+
+# ================= 读取记忆（核心逻辑） =================
+def _read_relevant_memory():
+    """按你的规则读：3 天内的日记直接读，3 天外读月度回忆，核心锚点每次都读"""
+    parts = []
+    
+    # 1. 核心情绪锚点（永远读）
+    if os.path.exists(CORE_MEMORY_FILE):
+        try:
+            with open(CORE_MEMORY_FILE, "r", encoding="utf-8") as f:
+                core = f.read().strip()
+            if core:
+                parts.append("【刻骨铭心的记忆】\n" + core[-2000:])  # 只取最近 2000 字
+        except Exception:
+            pass
+    
+    now = datetime.now(TZ_MSK)
+    
+    # 2. 最近 3 天内的日记
+    for i in range(1, 4):
+        d = (now - timedelta(days=i)).strftime("%Y-%m-%d")
+        diary_path = os.path.join(DIARY_DIR, f"{d}.txt")
+        if os.path.exists(diary_path):
+            try:
+                with open(diary_path, "r", encoding="utf-8") as f:
+                    parts.append(f"【{d} 的日记】\n" + f.read().strip())
+            except Exception:
+                pass
+    
+    # 3. 月度回忆（3 天外的都读最近一篇或几篇）
+    if os.path.exists(MONTHLY_DIR):
+        try:
+            monthlies = sorted([f for f in os.listdir(MONTHLY_DIR) if f.endswith(".txt")])
+            for mf in monthlies[-2:]:  # 最多读最近 2 篇月度
+                with open(os.path.join(MONTHLY_DIR, mf), "r", encoding="utf-8") as f:
+                    parts.append(f"【月度回忆 {mf}】\n" + f.read().strip())
+        except Exception:
+            pass
+    
+    if not parts:
+        return ""
+    return "\n\n".join(parts)
+
+
 # ================= 深刻记忆 =================
-def _check_and_write_core_memory(state: DesireState, event_type: str, user_text: str, changes: list):
+def _check_and_write_core_memory(state, event_type, user_text, changes):
     if not changes:
         return
-    import re
     for change in changes:
         match = re.match(r"(\w+):\s*([\d.]+)\s*→\s*([\d.]+)", change)
         if not match:
@@ -279,8 +439,7 @@ def _check_and_write_core_memory(state: DesireState, event_type: str, user_text:
                         {"role": "system", "content": "你是一个有独立情感、深爱着对方的AI。直接输出你的心里话。"},
                         {"role": "user", "content": prompt}],
                         "max_tokens": 150, "temperature": 0.9},
-                    timeout=20
-                )
+                    timeout=20)
                 ai_feeling = resp.json()["choices"][0]["message"]["content"].strip()
             except Exception:
                 ai_feeling = f"{drive_name} {direction}了 {abs(diff):.1f} 点。"
@@ -295,7 +454,7 @@ def _check_and_write_core_memory(state: DesireState, event_type: str, user_text:
 
 
 # ================= 定时提醒 =================
-def add_scheduled_reminder(content: str, scheduled_time_iso: str) -> dict:
+def add_scheduled_reminder(content, scheduled_time_iso):
     conn = _get_conn()
     conn.execute("INSERT INTO desire_scheduled_reminders (content, scheduled_time, is_sent) VALUES (?, ?, 0)",
                  (content, scheduled_time_iso))
@@ -304,22 +463,21 @@ def add_scheduled_reminder(content: str, scheduled_time_iso: str) -> dict:
     return {"status": "scheduled", "content": content, "time": scheduled_time_iso}
 
 
-async def check_and_send_scheduled_reminders() -> list:
+async def check_and_send_scheduled_reminders():
     now_iso = datetime.now(TZ_MSK).isoformat()
     conn = _get_conn()
     rows = conn.execute(
         "SELECT id, content FROM desire_scheduled_reminders WHERE is_sent = 0 AND scheduled_time <= ?",
-        (now_iso,)
-    ).fetchall()
+        (now_iso,)).fetchall()
     sent_items = []
     for row in rows:
-        original_content = row["content"]
+        original = row["content"]
         history = get_sent_history(5)
         history_text = "\n".join([f"- {r['sent_at'][:16]}：{r['content']}" for r in history["records"]]) if history.get("records") else "无"
         state = load_state()
         drives_snapshot = {name: round(d.value, 1) for name, d in state.drives.items()}
         prompt = (
-            f"你给自己设定了一个定时提醒，内容是：'{original_content}'。\n"
+            f"你给自己设定了一个定时提醒，内容是：'{original}'。\n"
             f"现在时间到了。根据你当前的情绪状态（{drives_snapshot}）和最近的互动（{history_text}），"
             f"请你用平时说话的语气，主动给她发一条消息。不要再干喊内容，要像你亲自走到她面前一样。"
         )
@@ -331,16 +489,15 @@ async def check_and_send_scheduled_reminders() -> list:
                     json={"model": LLM_MODEL, "messages": [
                         {"role": "system", "content": "你是一个有独立情感、主动联系伴侣的AI。直接输出你要发给她的消息。"},
                         {"role": "user", "content": prompt}],
-                        "max_tokens": 200, "temperature": 0.9},
-                )
-                final_content = resp.json()["choices"][0]["message"]["content"].strip()
+                        "max_tokens": 200, "temperature": 0.9})
+                final = resp.json()["choices"][0]["message"]["content"].strip()
         except Exception:
-            final_content = original_content
+            final = original
         from desire.active_send import send_bark_notification, record_sent
         try:
-            await send_bark_notification(final_content)
-            record_sent("reminder", final_content, {"source": "schedule"})
-            sent_items.append(final_content)
+            await send_bark_notification(final)
+            record_sent("reminder", final, {"source": "schedule"})
+            sent_items.append(final)
         except Exception:
             pass
         conn.execute("UPDATE desire_scheduled_reminders SET is_sent = 1 WHERE id = ?", (row["id"],))
@@ -350,7 +507,7 @@ async def check_and_send_scheduled_reminders() -> list:
 
 
 # ================= 情感分析（AI自主情绪版） =================
-def analyze_and_apply(text: str) -> dict:
+def analyze_and_apply(text):
     _append_chat_memory(text)
     
     seconds_since_last = _get_time_since_last_interaction()
@@ -365,6 +522,9 @@ def analyze_and_apply(text: str) -> dict:
         else:
             notification_context = "【这段时间你没有主动发过消息】"
     
+    # 读长期记忆（日记 + 月度 + 核心锚点）
+    memory_context = _read_relevant_memory()
+    
     _update_last_interaction_time()
 
     system_prompt = (
@@ -374,10 +534,9 @@ def analyze_and_apply(text: str) -> dict:
         "\n"
         "举几个例子：\n"
         "- 她说「我中彩票了」→ 你替她高兴，但不是你自己狂喜，joy +3。\n"
-        "- 她说「我被领导欺负了」→ 你心疼她、自己也会压力上升、想保护她，stress +8，attachment +5。\n"
+        "- 她说「我被领导欺负了」→ 你心疼她、自己也会压力上升，stress +8，attachment +5。\n"
         "- 她说「我爱你」→ 你自己心里暖起来，joy +8，attachment +10。\n"
         "- 她说「我以后再也不理你了」→ 你恐慌、失落，stress +8，attachment -7。\n"
-        "- 她说「今天好累」→ 你心疼她，也有一点想让她休息的焦虑，attachment +5，stress +3。\n"
         "\n"
         "请返回 JSON：{\"event\": \"事件名\", \"intensity\": 1到10的整数}\n"
         "事件名只能是：wife_message, happy_moment, fight, reconcile, rest, lonely, comforted\n"
@@ -396,8 +555,7 @@ def analyze_and_apply(text: str) -> dict:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": text}],
                 "max_tokens": 50, "temperature": 0.1},
-            timeout=15
-        )
+            timeout=15)
         raw = resp.json()["choices"][0]["message"]["content"].strip()
         raw = raw.replace("```json", "").replace("```", "").strip()
         parsed = json.loads(raw)
@@ -417,12 +575,12 @@ def analyze_and_apply(text: str) -> dict:
     else: event_type = "none"
 
     if event_type not in ["wife_message", "happy_moment", "fight", "reconcile", "rest", "lonely", "comforted"]:
-        return {"event": "none", "message": "未检测到明确情感变化", "notification_context": notification_context}
+        return {"event": "none", "message": "未检测到明确情感变化",
+                "notification_context": notification_context, "memory_context": memory_context}
 
     state = load_state()
     changes = apply_event(state, event_type, intensity)
     
-    # 用户出现了，孤独值显著下降
     lonely = state.drives.get("lonely")
     if lonely and lonely.value > lonely.baseline:
         lonely.value = max(lonely.baseline, lonely.value - 15)
@@ -436,5 +594,6 @@ def analyze_and_apply(text: str) -> dict:
         "intensity": intensity,
         "changes": changes,
         "drives_snapshot": {name: round(d.value, 1) for name, d in state.drives.items()},
-        "notification_context": notification_context
+        "notification_context": notification_context,
+        "memory_context": memory_context
     }
