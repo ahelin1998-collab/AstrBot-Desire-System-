@@ -1,5 +1,5 @@
 # desire/integration.py
-"""欲望系统桥接（双向记忆 + 第一人称日记 + 10天月度压缩 + 核心锚点）"""
+"""欲望系统桥接（双向记忆 + 第一人称日记 + 10天月度压缩 + 核心锚点 + 念头回传）"""
 
 import json
 import sqlite3
@@ -25,6 +25,7 @@ CHAT_MEMORY_LIMIT = 400
 MEMORY_READ_HOURS = 1.0
 MONTHLY_BATCH_SIZE = 10
 CORE_MEMORY_THRESHOLD = 5.0
+RECENT_THOUGHT_HOURS = 1.0
 
 LLM_API_KEY = os.environ.get("DESIRE_LLM_API_KEY", "")
 LLM_API_BASE = os.environ.get("DESIRE_LLM_API_BASE", "")
@@ -526,7 +527,26 @@ def _local_keyword_match(text: str):
     return None, None
 
 
-# ================= 情感分析（1小时记忆门槛 + 精简返回） =================
+# ================= 提取最近的新念头 =================
+def _extract_recent_thoughts(state: DesireState) -> str:
+    """提取最近 RECENT_THOUGHT_HOURS 小时内产生的新念头"""
+    parts = []
+    now = datetime.now(TZ_MSK)
+    for t in state.thoughts:
+        if t.resolved:
+            continue
+        try:
+            created = datetime.fromisoformat(t.created_at)
+            if (now - created).total_seconds() <= RECENT_THOUGHT_HOURS * 3600:
+                parts.append(t.content)
+        except Exception:
+            pass
+    if not parts:
+        return ""
+    return "【你最近刚想过的事】\n" + "\n".join([f"- {c}" for c in parts])
+
+
+# ================= 情感分析（1小时记忆门槛 + 念头回传） =================
 def analyze_and_apply(text):
     _append_chat_memory(text)
 
@@ -594,7 +614,7 @@ def analyze_and_apply(text):
         else: event_type = "none"
 
     if event_type not in ["wife_message", "happy_moment", "fight", "reconcile", "rest", "lonely", "comforted"]:
-        return {"event": "none", "memory_context": memory_context}
+        return {"event": "none", "memory_context": memory_context, "thought_context": None}
 
     state = load_state()
     changes = apply_event(state, event_type, intensity)
@@ -607,8 +627,13 @@ def analyze_and_apply(text):
     save_state(state)
     _check_and_write_core_memory(state, event_type, text, changes)
 
+    # ================= 提取最近1小时的新念头 =================
+    thought_context = _extract_recent_thoughts(state) or None
+    # =========================================================
+
     return {
         "event": event_type,
         "intensity": intensity,
-        "memory_context": memory_context
+        "memory_context": memory_context,
+        "thought_context": thought_context
     }
