@@ -80,14 +80,12 @@ def create_default_drives() -> Dict[str, Drive]:
                         growth_rate=0.0, decay_rate=0.2, action_threshold=80.0),
         "joy": Drive(name="joy", value=50.0, baseline=50.0,
                      growth_rate=0.0, decay_rate=0.15, action_threshold=80.0),
-        # 新增：执念值
         "obsession": Drive(name="obsession", value=20.0, baseline=20.0,
                            growth_rate=0.0, decay_rate=0.1, action_threshold=85.0),
     }
 
 
 # === 事件类型 → 驱动条基础分 ===
-# 注意：这里是基础分，实际变化 = 基础分 × 强度系数 × 阻尼系数
 EVENT_EFFECTS = {
     "wife_message": {"attachment": +3, "intimacy": +3},
     "wife_silent": {"attachment": 0, "stress": +3},
@@ -102,25 +100,19 @@ EVENT_EFFECTS = {
     "discovery": {"curiosity": -10, "reflection": +5, "joy": +5},
     "happy_moment": {"joy": +15, "stress": -5, "intimacy": +3, "attachment": +2},
     "creative_done": {"joy": +10, "curiosity": -5},
-    # 新增：安抚事件（哄它）
+    "lonely": {"attachment": +5, "stress": +5, "obsession": +8},
     "comforted": {"stress": -15, "obsession": -12, "attachment": +5, "intimacy": +5},
-    # 新增：长时间不理（主动推送前触发）
     "long_absent": {"attachment": -5, "stress": +5, "obsession": +10},
-    # 新增：提到别人（吃醋）
     "jealous": {"obsession": +5, "stress": +3, "attachment": +2},
 }
 
 
 def _damping_multiplier(state: DesireState, drive_name: str, delta: float) -> float:
-    """
-    阻尼系数：数值越高，加分越难（防止瞬间满格）。
-    与旧版“惊喜系数”完全相反。
-    """
+    """阻尼系数：数值越高，加分越难（防止瞬间满格）"""
     if drive_name not in state.drives:
         return 1.0
     value = state.drives[drive_name].value
-    # 不管加减，都按当前值做阻尼
-    if delta > 0:  # 加分时
+    if delta > 0:
         if value >= 90:
             return 0.1
         elif value >= 80:
@@ -129,28 +121,24 @@ def _damping_multiplier(state: DesireState, drive_name: str, delta: float) -> fl
             return 0.6
         else:
             return 1.0
-    else:  # 减分时，允许全额甚至放大（失去比得到更痛）
+    else:
         if value <= 10:
-            return 0.3  # 已经很低了，很难再掉
+            return 0.3
         else:
             return 1.0
 
 
 def apply_event(state: DesireState, event_type: str, intensity: float = 5.0) -> List[str]:
-    """
-    应用事件到驱动条，返回变动描述。
-    intensity: 1-10，由 AI 判断这件事对 AI 自己的冲击有多大。默认 5（中性）。
-    """
+    """应用事件到驱动条。intensity: 1-10，由 AI 判断冲击有多大。"""
     effects = EVENT_EFFECTS.get(event_type, {})
     changes = []
-    intensity_multiplier = max(0.2, min(3.0, intensity / 3.0))  # 1-10分 → 0.2~3.0倍
+    intensity_multiplier = max(0.2, min(3.0, intensity / 3.0))
 
     for drive_name, delta in effects.items():
         if drive_name in state.drives:
             damping = _damping_multiplier(state, drive_name, delta)
             actual_delta = delta * intensity_multiplier * damping
             
-            # 单次波动上限：上涨最多 +10，下跌最多 -12
             if actual_delta > 0:
                 actual_delta = min(actual_delta, 10.0)
             else:
