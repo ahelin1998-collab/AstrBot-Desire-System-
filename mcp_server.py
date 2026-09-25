@@ -7,7 +7,8 @@ from typing import Any
 
 from desire.integration import (
     init_tables, run_tick, get_status_summary, get_sent_history,
-    analyze_and_apply, add_scheduled_reminder, append_ai_reply
+    analyze_and_apply, add_scheduled_reminder, append_ai_reply,
+    send_bark_now,
 )
 
 
@@ -37,27 +38,33 @@ class DesireMCPServer:
              "inputSchema": {"type": "object",
                              "properties": {"thought_text": {"type": "string"}},
                              "required": ["thought_text"]}},
-            # 分析用户消息（写聊天记忆 + 更新情绪）
             {"name": "desire_analyze",
              "description": "Analyze user input and automatically apply the matching emotion event. USE THIS TOOL EVERY TIME THE USER SENDS A MESSAGE.",
              "inputSchema": {"type": "object",
                              "properties": {"text": {"type": "string",
                                                      "description": "The user's chat message."}},
                              "required": ["text"]}},
-            # 记录 AI 自己的回复（写聊天记忆）
             {"name": "desire_log_reply",
              "description": "Log your own reply message so it becomes part of the shared conversation memory. CALL THIS TOOL AFTER YOU FINISH WRITING YOUR REPLY, with text = your full reply.",
              "inputSchema": {"type": "object",
                              "properties": {"text": {"type": "string",
                                                      "description": "Your full reply that you just wrote."}},
                              "required": ["text"]}},
-            # 定时提醒
             {"name": "schedule_reminder",
              "description": "Schedule a specific reminder message to be sent to the user at a future time via Bark.",
              "inputSchema": {"type": "object",
                              "properties": {"content": {"type": "string"},
                                             "scheduled_time": {"type": "string"}},
                              "required": ["content", "scheduled_time"]}},
+            {
+                "name": "send_bark_now",
+                "description": "Immediately send a message to the user via Bark. Use this ONLY when the user explicitly commands you to send a message right now. This bypasses the quiet hours and cooldown.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"content": {"type": "string", "description": "The exact message to send."}},
+                    "required": ["content"],
+                },
+            },
         ]
 
     def call_tool(self, name: str, arguments: dict[str, Any] | None) -> dict[str, Any]:
@@ -77,6 +84,8 @@ class DesireMCPServer:
         elif name == "schedule_reminder":
             result = add_scheduled_reminder(str(arguments.get("content", "")),
                                             str(arguments.get("scheduled_time", "")))
+        elif name == "send_bark_now":
+            result = send_bark_now(str(arguments.get("content", "")))
         elif name == "desire_resolve_thought":
             result = {"error": "resolve_thought 功能在当前版本中不可用"}
         else:
