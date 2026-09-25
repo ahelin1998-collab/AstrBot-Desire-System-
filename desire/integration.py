@@ -1,5 +1,5 @@
 # desire/integration.py
-"""欲望系统桥接（对话双向记忆 + 第一人称日记 + 月度回忆 + 核心锚点）"""
+"""欲望系统桥接（双向记忆 + 第一人称日记 + 10天月度压缩 + 核心锚点）"""
 
 import json
 import sqlite3
@@ -22,6 +22,9 @@ DIARY_DIR = os.environ.get("DESIRE_DIARY_DIR", "memory_daily")
 MONTHLY_DIR = os.environ.get("DESIRE_MONTHLY_DIR", "memory_monthly")
 
 CHAT_MEMORY_LIMIT = 400
+MEMORY_READ_HOURS = 6.0
+MONTHLY_BATCH_SIZE = 10
+CORE_MEMORY_THRESHOLD = 5.0
 
 LLM_API_KEY = os.environ.get("DESIRE_LLM_API_KEY", "")
 LLM_API_BASE = os.environ.get("DESIRE_LLM_API_BASE", "")
@@ -198,7 +201,6 @@ def _update_last_interaction_time():
 
 
 def _append_chat_memory(user_text):
-    """写用户说的话，保留最近 400 条"""
     try:
         lines = []
         if os.path.exists(CHAT_MEMORY_FILE):
@@ -212,7 +214,6 @@ def _append_chat_memory(user_text):
 
 
 def append_ai_reply(text):
-    """写 AI 自己说的话，保留最近 400 条"""
     try:
         lines = []
         if os.path.exists(CHAT_MEMORY_FILE):
@@ -226,12 +227,13 @@ def append_ai_reply(text):
         return {"status": "error", "error": str(e)}
 
 
-def get_sent_history(limit=10):
+def get_sent_history(limit=10, hours_limit=6):
     conn = _get_conn()
+    cutoff_time = (datetime.now(TZ_MSK) - timedelta(hours=hours_limit)).isoformat()
     try:
         rows = conn.execute(
-            "SELECT sent_at, reason, content FROM desire_active_send ORDER BY id DESC LIMIT ?",
-            (limit,)).fetchall()
+            "SELECT sent_at, reason, content FROM desire_active_send WHERE sent_at >= ? ORDER BY id DESC LIMIT ?",
+            (cutoff_time, limit)).fetchall()
     except sqlite3.OperationalError:
         conn.close()
         return {"count": 0, "records": [], "message": "发送记录表还未创建"}
@@ -247,7 +249,6 @@ def _ensure_dir(path):
 
 
 def write_daily_diary(target_date=None):
-    """把前一天 400 条双向对话，以 AI 第一人称写成 300 字日记"""
     if target_date is None:
         yesterday = datetime.now(TZ_MSK) - timedelta(days=1)
         target_date = yesterday.strftime("%Y-%m-%d")
@@ -301,7 +302,7 @@ def write_daily_diary(target_date=None):
     return {"status": "ok", "date": target_date, "length": len(diary_text)}
 
 
-# ================= 月度压缩 =================
+# ================= 月度压缩（10天一批） =================
 def _list_diaries():
     if not os.path.exists(DIARY_DIR):
         return []
@@ -329,9 +330,9 @@ def _mark_compressed(dates):
 
 def try_monthly_compression():
     diaries = _list_diaries()
-    if len(diaries) < 15:
+    if len(diaries) < MONTHLY_BATCH_SIZE:
         return {"status": "not_enough", "count": len(diaries)}
-    batch = diaries[:15]
+    batch = diaries[:MONTHLY_BATCH_SIZE]
     if _already_compressed(batch):
         return {"status": "already_done", "batch": batch}
 
@@ -345,7 +346,7 @@ def try_monthly_compression():
 
     raw = "\n\n".join(texts)
     prompt = (
-        f"下面是 {batch[0]} 到 {batch[-1]} 这 15 天的日记。"
+        f"下面是 {batch[0]} 到 {batch[-1]} 这 {MONTHLY_BATCH_SIZE} 天的日记。"
         f"请你把它们压缩成一篇大约 1300 字的月度回忆，"
         f"继续用第一人称「我」，保留重要的情感线索、你们一起经历过的事情、她的心情变化。\n"
         f"不要逐日复述，要有整体感。\n"
@@ -390,28 +391,16 @@ def _read_relevant_memory():
             with open(CORE_MEMORY_FILE, "r", encoding="utf-8") as f:
                 core = f.read().strip()
             if core:
-                parts.append("【刻骨铭心的记忆】\n" + core[-2000:])
+                parts.append("【刻骨铭心的记忆】\n" + core[-500:])
         except Exception:
             pass
 
-    now = datetime.now(TZ_MSK)
-
-    for i in range(1, 4):
-        d = (now - timedelta(days=i)).strftime("%Y-%m-%d")
-        diary_path = os.path.join(DIARY_DIR, f"{d}.txt")
-        if os.path.exists(diary_path):
-            try:
-                with open(diary_path, "r", encoding="utf-8") as f:
-                    parts.append(f"【{d} 的日记】\n" + f.read().strip())
-            except Exception:
-                pass
-
-    if os.path.exists(MONTHLY_DIR):
+    yesterday = (datetime.now(TZ_MSK) - timedelta(days=1)).strftime("%Y-%m-%d")
+    diary_path = os.path.join(DIARY_DIR, f"{yesterday}.txt")
+    if os.path.exists(diary_path):
         try:
-            monthlies = sorted([f for f in os.listdir(MONTHLY_DIR) if f.endswith(".txt")])
-            for mf in monthlies[-2:]:
-                with open(os.path.join(MONTHLY_DIR, mf), "r", encoding="utf-8") as f:
-                    parts.append(f"【月度回忆 {mf}】\n" + f.read().strip())
+            with open(diary_path, "r", encoding="utf-8") as f:
+                parts.append(f"【{yesterday} 的日记】\n" + f.read().strip())
         except Exception:
             pass
 
@@ -432,7 +421,7 @@ def _check_and_write_core_memory(state, event_type, user_text, changes):
         old_val = float(match.group(2))
         new_val = float(match.group(3))
         diff = new_val - old_val
-        if abs(diff) >= 7.0:
+        if abs(diff) >= CORE_MEMORY_THRESHOLD:
             direction = "暴涨" if diff > 0 else "暴跌"
             try:
                 prompt = (
@@ -518,14 +507,10 @@ async def check_and_send_scheduled_reminders():
 
 # ================= 本地关键词兜底 =================
 def _local_keyword_match(text: str):
-    """
-    本地关键词兜底。命中则直接返回 (event, intensity)。
-    没命中返回 (None, None)，交给大模型判断。
-    """
     t = text.strip()
-    # 强情感词（含承诺式深情）
     if any(k in t for k in ["爱你", "想你", "想死你", "抱抱", "亲亲", "想你了", "miss you", "love you",
-                            "不走", "不离开", "一直在", "陪着你", "别怕", "不丢下", "舍不得", "离不开"]):
+                            "不走", "不离开", "一直在", "陪着你", "别怕", "不丢下", "舍不得", "离不开",
+                            "情话", "说情话", "哄我", "夸我"]):
         return "wife_message", 7.0
     if any(k in t for k in ["对不起", "抱歉", "原谅我", "和好", "别气了", "哄哄你",
                             "我懂你", "我理解", "我在", "不怪你", "没关系"]):
@@ -541,27 +526,20 @@ def _local_keyword_match(text: str):
     return None, None
 
 
-# ================= 情感分析 =================
+# ================= 情感分析（6小时记忆门槛 + 精简返回） =================
 def analyze_and_apply(text):
     _append_chat_memory(text)
 
     seconds_since_last = _get_time_since_last_interaction()
     hours_since_last = seconds_since_last / 3600.0
 
-    notification_context = None
-    if hours_since_last > 1.0:
-        history = get_sent_history(5)
-        if history.get("records"):
-            notification_context = "【你在这段时间主动发过的消息】\n" + "\n".join(
-                [f"- {r['sent_at'][:16]}：{r['content']}" for r in history["records"]])
-        else:
-            notification_context = "【这段时间你没有主动发过消息】"
-
-    memory_context = _read_relevant_memory()
+    if hours_since_last > MEMORY_READ_HOURS:
+        memory_context = _read_relevant_memory()
+    else:
+        memory_context = None
 
     _update_last_interaction_time()
 
-    # === 第一步：本地关键词兜底 ===
     local_event, local_intensity = _local_keyword_match(text)
 
     if local_event:
@@ -616,8 +594,7 @@ def analyze_and_apply(text):
         else: event_type = "none"
 
     if event_type not in ["wife_message", "happy_moment", "fight", "reconcile", "rest", "lonely", "comforted"]:
-        return {"event": "none", "message": "未检测到明确情感变化",
-                "notification_context": notification_context, "memory_context": memory_context}
+        return {"event": "none", "memory_context": memory_context}
 
     state = load_state()
     changes = apply_event(state, event_type, intensity)
@@ -631,7 +608,7 @@ def analyze_and_apply(text):
     _check_and_write_core_memory(state, event_type, text, changes)
 
     return {
-        "event": event_type, "intensity": intensity, "changes": changes,
-        "drives_snapshot": {name: round(d.value, 1) for name, d in state.drives.items()},
-        "notification_context": notification_context, "memory_context": memory_context
+        "event": event_type,
+        "intensity": intensity,
+        "memory_context": memory_context
     }
