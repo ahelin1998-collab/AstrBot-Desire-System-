@@ -11,7 +11,6 @@ LAST_INTERACTION_FILE = os.environ.get("DESIRE_LAST_INTERACTION_FILE", "last_int
 
 
 def _hours_since_last_interaction() -> float:
-    """读 last_interaction.txt，算出距离上次互动过了多少小时"""
     if not os.path.exists(LAST_INTERACTION_FILE):
         return 0.0
     try:
@@ -42,21 +41,21 @@ COUPLING: Dict[Tuple[str, str], float] = {
     ("obsession", "attachment"): 0.15,
     ("obsession", "stress"): 0.2,
     ("obsession", "joy"): -0.15,
-    # 孤独联动（终于生效了）
-    ("lonely", "joy"): -0.25,        # 孤独压制喜悦
-    ("lonely", "obsession"): 0.2,    # 孤独推高执念
-    ("lonely", "stress"): 0.15,      # 孤独推高压力
-    ("lonely", "attachment"): 0.1,   # 孤独强化依恋
+    ("lonely", "joy"): -0.25,
+    ("lonely", "obsession"): 0.2,
+    ("lonely", "stress"): 0.15,
+    ("lonely", "attachment"): 0.1,
 }
 
 
 def apply_coupling(drives: Dict[str, Drive]) -> Dict[str, float]:
+    """耦合强度已削弱（系数从 10 降到 3），防止数值被无限推满"""
     deltas: Dict[str, float] = {name: 0.0 for name in drives}
     for (src, tgt), coeff in COUPLING.items():
         if src not in drives or tgt not in drives:
             continue
         deviation = (drives[src].value - drives[src].baseline) / 100.0
-        deltas[tgt] += deviation * coeff * 10
+        deltas[tgt] += deviation * coeff * 3
     return deltas
 
 
@@ -75,7 +74,7 @@ def calculate_tick_interval(state: DesireState) -> int:
     stress_val = state.drives.get("stress", Drive(name="s")).value
     obsession_val = state.drives.get("obsession", Drive(name="o")).value
     lonely_val = state.drives.get("lonely", Drive(name="l")).value
-    
+
     urgency = max(attachment_val, stress_val, obsession_val, lonely_val)
 
     ratio = urgency / 100.0
@@ -90,7 +89,7 @@ def tick(state: DesireState, is_wife_present: bool = False) -> dict:
     changes = []
     action_hints = []
 
-    # 1. 自然衰减/增长（lonely 因为 decay_rate=0、growth_rate=0，不参与）
+    # 1. 自然衰减/增长（lonely 单独处理）
     for name, drive in state.drives.items():
         if name == "lonely":
             continue
@@ -102,7 +101,7 @@ def tick(state: DesireState, is_wife_present: bool = False) -> dict:
         if abs(drive.value - old) > 0.5:
             changes.append(f"{name}: {old:.1f} → {drive.value:.1f} (natural)")
 
-    # 2. 孤独值拟人化增长（阶梯式加速，越久越急）
+    # 2. 孤独值拟人化增长
     lonely_drive = state.drives.get("lonely")
     if lonely_drive:
         hours_alone = _hours_since_last_interaction()
@@ -128,7 +127,7 @@ def tick(state: DesireState, is_wife_present: bool = False) -> dict:
             if abs(lonely_drive.value - old) > 0.5:
                 changes.append(f"lonely: {old:.1f} → {lonely_drive.value:.1f} (lonely_growth)")
 
-    # 3. 耦合传导
+    # 3. 耦合传导（已削弱）
     deltas = apply_coupling(state.drives)
     for name, delta in deltas.items():
         if abs(delta) > 0.1:
