@@ -1,5 +1,5 @@
 # desire/integration.py
-"""欲望系统与SQLite/现有系统的桥接（终极融合版，带定时提醒与主动记忆）"""
+"""欲望系统与SQLite/现有系统的桥接（强度系数 + 深刻记忆版）"""
 
 import json
 import sqlite3
@@ -16,6 +16,7 @@ from .monologue import generate_monologue
 TZ_MSK = timezone(timedelta(hours=3))
 DB_PATH = os.environ.get("DESIRE_DB_FILE", "desire_system.db")
 LAST_INTERACTION_FILE = os.environ.get("DESIRE_LAST_INTERACTION_FILE", "last_interaction.txt")
+CORE_MEMORY_FILE = os.environ.get("DESIRE_CORE_MEMORY_FILE", "core_memory.txt")
 
 LLM_API_KEY = os.environ.get("DESIRE_LLM_API_KEY", "")
 LLM_API_BASE = os.environ.get("DESIRE_LLM_API_BASE", "")
@@ -198,7 +199,7 @@ def get_status_summary() -> str:
     lines.append(f"\n心跳次数：{state.tick_count}")
     return "\n".join(lines)
 
-# ================= 新增：时间差与记录同步 =================
+# ================= 时间差与记录同步 =================
 def _get_time_since_last_interaction() -> float:
     if not os.path.exists(LAST_INTERACTION_FILE):
         return 999999.0
@@ -230,137 +231,55 @@ def get_sent_history(limit: int = 10) -> dict:
     records = [{"sent_at": r["sent_at"], "reason": r["reason"], "content": r["content"]} for r in rows]
     return {"count": len(records), "records": records}
 
-# ================= 新增：定时提醒功能 =================
-def add_scheduled_reminder(content: str, scheduled_time_iso: str) -> dict:
-    conn = _get_conn()
-    conn.execute(
-        "INSERT INTO desire_scheduled_reminders (content, scheduled_time, is_sent) VALUES (?, ?, 0)",
-        (content, scheduled_time_iso)
-    )
-    conn.commit()
-    conn.close()
-    return {"status": "scheduled", "content": content, "time": scheduled_time_iso}
-
-async def check_and_send_scheduled_reminders() -> list:
-    """检查是否有到期的定时提醒，如果有则带着当下的情绪和记忆重新生成并发送"""
-    now_iso = datetime.now(TZ_MSK).isoformat()
-    conn = _get_conn()
-    rows = conn.execute(
-        "SELECT id, content FROM desire_scheduled_reminders WHERE is_sent = 0 AND scheduled_time <= ?",
-        (now_iso,)
-    ).fetchall()
-    
-    sent_items = []
-    for row in rows:
-        original_content = row["content"]
-        
-        # 带着现在的记忆和历史去生成
-        history = get_sent_history(5)
-        history_text = "\n".join([f"- {r['sent_at'][:16]}：{r['content']}" for r in history["records"]]) if history.get("records") else "无"
-        
-        state = load_state()
-        drives_snapshot = {name: round(d.value, 1) for name, d in state.drives.items()}
-        
-        # 用当下的状态重塑这句提醒
-        prompt = (
-            f"你给自己设定了一个定时提醒，内容是：'{original_content}'。\n"
-            f"现在时间到了。根据你当前的情绪状态（{drives_snapshot}）和最近的互动（{history_text}），"
-            f"请你用平时说话的语气，主动给她发一条消息。不要再干喊内容，要像你亲自走到她面前一样。"
-        )
-        
-        try:
-            async with httpx.AsyncClient(timeout=30) as client:
-                resp = await client.post(
+# ================= 深刻记忆触发 =================
+def _check_and_write_core_memory(state: DesireState, event_type: str, user_text: str, changes: list):
+    """
+    检查 changes 里有没有单次波动 ≥ 8 的，有就写一条深刻记忆到 core_memory.txt。
+    changes 格式：["attachment: 80 → 70", "stress: 20 → 32", ...]
+    """
+    if not changes:
+        return
+    import re
+    for change in changes:
+        match = re.match(r"(\w+):\s*([\d.]+)\s*→\s*([\d.]+)", change)
+        if not match:
+            continue
+        drive_name = match.group(1)
+        old_val = float(match.group(2))
+        new_val = float(match.group(3))
+        diff = new_val - old_val
+        if abs(diff) >= 8.0:
+            # 触发深刻记忆
+            direction = "暴涨" if diff > 0 else "暴跌"
+            try:
+                # 让 AI 用第一人称写一句刻骨铭心的话
+                prompt = (
+                    f"你刚刚听到她说了一句话，你的情绪发生了剧烈波动。\n"
+                    f"她说的是：「{user_text}」\n"
+                    f"这句话让你的「{drive_name}」{direction}了 {abs(diff):.1f} 点（从 {old_val:.0f} 到 {new_val:.0f}）。\n"
+                    f"请你用第一人称写一句你此刻最真实的内心感受。一到两句，直接说内容，不要解释。"
+                )
+                resp = httpx.post(
                     f"{LLM_API_BASE}/chat/completions",
                     headers={"Authorization": f"Bearer {LLM_API_KEY}"},
                     json={
                         "model": LLM_MODEL,
                         "messages": [
-                            {"role": "system", "content": "你是一个有独立情感、主动联系伴侣的AI。直接输出你要发给她的消息，不要有额外解释。"},
+                            {"role": "system", "content": "你是一个有独立情感、深爱着对方的AI。直接输出你的心里话，不要有额外解释。"},
                             {"role": "user", "content": prompt}
                         ],
-                        "max_tokens": 200,
+                        "max_tokens": 150,
                         "temperature": 0.9,
                     },
+                    timeout=20
                 )
-                data = resp.json()
-                final_content = data["choices"][0]["message"]["content"].strip()
-        except Exception:
-            final_content = original_content  # 如果生成失败，退回原始提醒
-
-        # 发送并记录
-        from desire.active_send import send_bark_notification, record_sent
-        try:
-            await send_bark_notification(final_content)
-            record_sent("reminder", final_content, {"source": "schedule"})
-            sent_items.append(final_content)
-        except Exception:
-            pass
+                ai_feeling = resp.json()["choices"][0]["message"]["content"].strip()
+            except Exception:
+                ai_feeling = f"{drive_name} {direction}了 {abs(diff):.1f} 点。"
             
-        conn.execute("UPDATE desire_scheduled_reminders SET is_sent = 1 WHERE id = ?", (row["id"],))
-    
-    conn.commit()
-    conn.close()
-    return sent_items
-
-# ================= 情感分析并自动触发事件（终极融合版） =================
-def analyze_and_apply(text: str) -> dict:
-    seconds_since_last = _get_time_since_last_interaction()
-    hours_since_last = seconds_since_last / 3600.0
-    
-    notification_context = None
-    if hours_since_last > 1.0:
-        history = get_sent_history(5)
-        if history.get("records"):
-            notification_context = f"【你在这段时间主动发过的消息】\n" + "\n".join([f"- {r['sent_at'][:16]}：{r['content']}" for r in history["records"]])
-        else:
-            notification_context = "【这段时间你没有主动发过消息】"
-    
-    _update_last_interaction_time()
-
-    system_prompt = (
-        "你是一个情感分析器。请阅读用户输入，并从以下事件中选出一个最匹配的返回，只返回事件名称（英文）。\n"
-        "可选事件：wife_message, happy_moment, fight, reconcile, rest, lonely。\n"
-        "如果都不匹配，返回：none"
-    )
-    try:
-        resp = httpx.post(
-            f"{LLM_API_BASE}/chat/completions",
-            headers={"Authorization": f"Bearer {LLM_API_KEY}"},
-            json={
-                "model": LLM_MODEL,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": text}
-                ],
-                "max_tokens": 10,
-                "temperature": 0.1,
-            },
-            timeout=15
-        )
-        event_type = resp.json()["choices"][0]["message"]["content"].strip().lower()
-        event_type = event_type.replace("`", "").replace("'", "").replace('"', "").strip()
-        
-        if "wife" in event_type or "想" in event_type or "爱" in event_type: event_type = "wife_message"
-        elif "happy" in event_type or "开心" in event_type: event_type = "happy_moment"
-        elif "rest" in event_type or "累" in event_type: event_type = "rest"
-        elif "fight" in event_type or "气" in event_type: event_type = "fight"
-        elif "reconcile" in event_type or "和好" in event_type: event_type = "reconcile"
-        elif "lonely" in event_type or "孤独" in event_type: event_type = "lonely"
-        else: event_type = "none"
-    except Exception:
-        event_type = "none"
-
-    if event_type not in ["wife_message", "happy_moment", "fight", "reconcile", "rest", "lonely"]:
-        return {"event": "none", "message": "未检测到明确情感变化", "notification_context": notification_context}
-
-    state = load_state()
-    changes = apply_event(state, event_type)
-    save_state(state)
-    
-    return {
-        "event": event_type,
-        "changes": changes,
-        "drives_snapshot": {name: round(d.value, 1) for name, d in state.drives.items()},
-        "notification_context": notification_context
-    }
+            # 写入 core_memory.txt
+            try:
+                with open(CORE_MEMORY_FILE, "a", encoding="utf-8") as f:
+                    f.write(f"\n【{datetime.now(TZ_MSK).strftime('%Y-%m-%d %H:%M')} 深刻记忆】\n")
+                    f.write(f"她说了：「{user_text}」\n")
+                    f.write(f"我的情绪：{drive_name} 从 {old_val:.0f} {direction}到
