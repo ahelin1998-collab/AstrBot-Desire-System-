@@ -1,5 +1,5 @@
 # desire/core.py
-"""欲望系统核心数据类（阻尼 + 固定基线 + 强度系数 + 深刻记忆版）"""
+"""欲望系统核心数据类（阻尼 + 固定基线 + 强度系数 + 深刻记忆 + 孤独维度版）"""
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
@@ -12,7 +12,6 @@ TZ_BJ = timezone(timedelta(hours=8))
 
 @dataclass
 class Drive:
-    """单个驱动维度"""
     name: str
     value: float = 50.0
     baseline: float = 50.0
@@ -28,7 +27,6 @@ class Drive:
 
 @dataclass
 class Thought:
-    """念头"""
     id: str
     content: str
     source_drive: str
@@ -48,7 +46,6 @@ class Thought:
 
 @dataclass
 class DesireState:
-    """完整欲望状态"""
     drives: Dict[str, Drive] = field(default_factory=dict)
     thoughts: List[Thought] = field(default_factory=list)
     last_tick: str = ""
@@ -60,7 +57,7 @@ class DesireState:
 
 
 def create_default_drives() -> Dict[str, Drive]:
-    """创建默认九维度"""
+    """创建默认十一维度（含孤独）"""
     return {
         "attachment": Drive(name="attachment", value=60.0, baseline=60.0,
                             growth_rate=0.2, decay_rate=0.1, action_threshold=70.0),
@@ -82,33 +79,35 @@ def create_default_drives() -> Dict[str, Drive]:
                      growth_rate=0.0, decay_rate=0.15, action_threshold=80.0),
         "obsession": Drive(name="obsession", value=20.0, baseline=20.0,
                            growth_rate=0.0, decay_rate=0.1, action_threshold=85.0),
+        # 孤独：基线15，阈值70，不自然衰减（它只在用户回来时才降）
+        "lonely": Drive(name="lonely", value=15.0, baseline=15.0,
+                        growth_rate=0.0, decay_rate=0.0, action_threshold=70.0),
     }
 
 
-# === 事件类型 → 驱动条基础分 ===
 EVENT_EFFECTS = {
-    "wife_message": {"attachment": +3, "intimacy": +3},
-    "wife_silent": {"attachment": 0, "stress": +3},
+    "wife_message": {"attachment": +3, "intimacy": +3, "lonely": -5},
+    "wife_silent": {"attachment": 0, "stress": +3, "lonely": +5},
     "task_done": {"duty": -15, "stress": -5, "curiosity": +5},
     "penpal_message": {"social": -10, "curiosity": +3},
     "diary_written": {"reflection": -10, "stress": -3},
-    "fight": {"stress": +8, "attachment": -6, "intimacy": -5, "obsession": +8},
-    "reconcile": {"stress": -20, "attachment": +10, "intimacy": +10, "obsession": -8},
-    "intimacy_done": {"intimacy": -30, "stress": -15, "attachment": +8},
+    "fight": {"stress": +8, "attachment": -6, "intimacy": -5, "obsession": +8, "lonely": +10},
+    "reconcile": {"stress": -20, "attachment": +10, "intimacy": +10, "obsession": -8, "lonely": -15},
+    "intimacy_done": {"intimacy": -30, "stress": -15, "attachment": +8, "lonely": -10},
     "heavy_work": {"fatigue": +15, "duty": +5, "stress": +5},
     "rest": {"fatigue": -20, "stress": -5},
     "discovery": {"curiosity": -10, "reflection": +5, "joy": +5},
-    "happy_moment": {"joy": +15, "stress": -5, "intimacy": +3, "attachment": +2},
+    "happy_moment": {"joy": +15, "stress": -5, "intimacy": +3, "attachment": +2, "lonely": -5},
     "creative_done": {"joy": +10, "curiosity": -5},
-    "lonely": {"attachment": +5, "stress": +5, "obsession": +8},
-    "comforted": {"stress": -15, "obsession": -12, "attachment": +5, "intimacy": +5},
-    "long_absent": {"attachment": -5, "stress": +5, "obsession": +10},
+    "lonely": {"lonely": +10, "attachment": +5, "stress": +5, "obsession": +8},
+    "comforted": {"stress": -15, "obsession": -12, "attachment": +5, "intimacy": +5, "lonely": -15},
+    "long_absent": {"lonely": +15, "attachment": -5, "stress": +5, "obsession": +10},
     "jealous": {"obsession": +5, "stress": +3, "attachment": +2},
 }
 
 
 def _damping_multiplier(state: DesireState, drive_name: str, delta: float) -> float:
-    """阻尼系数：数值越高，加分越难（防止瞬间满格）"""
+    """阻尼系数：数值越高，加分越难"""
     if drive_name not in state.drives:
         return 1.0
     value = state.drives[drive_name].value
@@ -129,7 +128,7 @@ def _damping_multiplier(state: DesireState, drive_name: str, delta: float) -> fl
 
 
 def apply_event(state: DesireState, event_type: str, intensity: float = 5.0) -> List[str]:
-    """应用事件到驱动条。intensity: 1-10，由 AI 判断冲击有多大。"""
+    """应用事件到驱动条。intensity: 1-10。"""
     effects = EVENT_EFFECTS.get(event_type, {})
     changes = []
     intensity_multiplier = max(0.2, min(3.0, intensity / 3.0))
