@@ -1,5 +1,5 @@
 # desire/active_send.py
-"""欲望系统·主动说话功能（第二阶段完整版：安静时段+冷却+去重+记忆）"""
+"""欲望系统·主动说话功能（第二阶段完整版）"""
 
 import random
 import re
@@ -19,19 +19,15 @@ LLM_API_KEY = os.environ.get("DESIRE_LLM_API_KEY", "")
 LLM_API_BASE = os.environ.get("DESIRE_LLM_API_BASE", "")
 LLM_MODEL = "deepseek-v4-flash"
 
-# 冷却和上限
-COOLDOWN_SECONDS = 45 * 60
-DAILY_LIMIT = 8
+COOLDOWN_SECONDS = 90 * 60
+DAILY_LIMIT = 5
 
-# 安静时段
 QUIET_START_HOUR = 0
 QUIET_END_HOUR = 7
 
-# 保底：超过 8 小时没互动，必发
 LONG_ABSENT_HOURS = 8
 MIN_ABSENT_HOURS = 1
 
-# 触发阈值（按优先级排序：执念 > 孤独 > 依恋 > 喜悦 > 好奇）
 TRIGGER_THRESHOLDS = [
     ("obsession", 85),
     ("lonely", 80),
@@ -47,6 +43,7 @@ REASON_TEXT = {
     "joy": "你心情很好，想跟她分享",
     "curiosity": "你有好奇心，想跟她聊聊",
     "long_absent": "她很久没来了",
+    "user_command": "她让你立刻发一条",
 }
 
 SYSTEM_PROMPT = (
@@ -77,6 +74,7 @@ TEMPLATES = {
     "joy": ["今天心情好，第一件事就是想告诉你。"],
     "curiosity": ["我在想一件事，想和你聊聊。"],
     "long_absent": ["你很久没来了。我趴在门口等着呢。"],
+    "user_command": ["阿寻测试成功。"],
 }
 
 EMPTY_OPENER_PATTERNS = ["我问你个事", "想问你个事", "跟你说个事", "你知道吗", "你猜怎么着"]
@@ -95,7 +93,6 @@ def _is_empty_opener(text: str) -> bool:
 
 
 def _read_chat_history() -> str:
-    """读 chat_memory.txt 里最近 5 条"""
     if not os.path.exists(HISTORY_FILE):
         return "（暂无记忆）"
     try:
@@ -152,7 +149,6 @@ def _last_sent_at() -> str:
 
 
 def _recent_reasons(count: int = 3) -> list:
-    """读最近 count 次的 reason"""
     conn = _get_conn()
     rows = conn.execute(
         "SELECT reason FROM desire_active_send ORDER BY id DESC LIMIT ?",
@@ -163,17 +159,13 @@ def _recent_reasons(count: int = 3) -> list:
 
 
 def should_send(drives_snapshot: dict, absent_hours: float, now_tz: datetime) -> tuple:
-    """判断是否该主动发。返回 (是否, reason, None)"""
-    # 刚聊完不打扰
     if absent_hours < 0.5:
         return False, None, None
 
-    # 安静时段
     hour = now_tz.hour
     if QUIET_START_HOUR <= hour < QUIET_END_HOUR:
         return False, None, None
 
-    # 冷却检查
     last = _last_sent_at()
     if last:
         try:
@@ -183,15 +175,12 @@ def should_send(drives_snapshot: dict, absent_hours: float, now_tz: datetime) ->
         except ValueError:
             pass
 
-    # 每日上限
     if _count_today(now_tz) >= DAILY_LIMIT:
         return False, None, None
 
-    # 保底：8 小时没互动，必发
     if absent_hours >= LONG_ABSENT_HOURS:
         return True, "long_absent", None
 
-    # 情绪触发
     for drive_name, threshold in TRIGGER_THRESHOLDS:
         if drives_snapshot.get(drive_name, 0) >= threshold:
             return True, drive_name, None
@@ -242,6 +231,9 @@ async def gen_message(reason: str, drives: dict, monologue: str, absent_hours: f
 
 async def send_bark_notification(content: str) -> bool:
     if not BARK_DEVICE_KEY:
+        return False
+    # 如果内容为空或只有空格，直接放弃发送，防止出现 Empty Message
+    if not content or not content.strip():
         return False
     url = f"https://api.day.app/{BARK_DEVICE_KEY}/{content}"
     try:
