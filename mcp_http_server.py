@@ -8,7 +8,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 from mcp_server import DesireMCPServer
-from desire.integration import run_tick, get_sent_history
+from desire.integration import (
+    run_tick, get_sent_history, check_and_send_scheduled_reminders,
+    write_daily_diary, try_monthly_compression,
+)
 from desire.active_send import init_table, should_send, gen_message, record_sent, send_bark_notification, TZ
 
 HOST = os.environ.get("DESIRE_MCP_HOST", "0.0.0.0")
@@ -19,7 +22,7 @@ AUTH_TOKEN = os.environ.get("DESIRE_MCP_TOKEN", "")
 class DesireMCPHTTPHandler(BaseHTTPRequestHandler):
     server_version = "AstrBotDesireMCP/2.0.1"
 
-    def _send_json(self, status: int, payload: dict[str, Any]) -> None:
+    def _send_json(self, status: int, payload: dict) -> None:
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -33,8 +36,7 @@ class DesireMCPHTTPHandler(BaseHTTPRequestHandler):
     def _authorized(self) -> bool:
         if not AUTH_TOKEN:
             return True
-        header = self.headers.get("Authorization", "")
-        return header == f"Bearer {AUTH_TOKEN}"
+        return self.headers.get("Authorization", "") == f"Bearer {AUTH_TOKEN}"
 
     def do_OPTIONS(self) -> None:
         self.send_response(204)
@@ -45,38 +47,47 @@ class DesireMCPHTTPHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         path = self.path.rstrip("/")
-
         if path == "/cron/check":
             async def do_check():
                 init_table()
-                # 1. 跑一次心跳
+                # 0. 凌晨 0-1 点，写昨天的日记 + 尝试月度压缩
+                now_tz = datetime.now(TZ)
+                if now_tz.hour == 0:
+                    try:
+                        write_daily_diary()
+                        try_monthly_compression()
+                    except Exception:
+                        pass
+                
+                # 1. 先检查有没有到期的定时提醒
+                sent_reminders = await check_and_send_scheduled_reminders()
+                if sent_reminders:
+                    return True
+                
+                # 2. 跑心跳
                 tick_result = run_tick()
                 drives_snapshot = tick_result.get("drives_snapshot", {})
                 monologue = tick_result.get("monologue", "")
-
-                # 2. 读取最近3条已发送消息，拼进内心独白
+                
                 history = get_sent_history(3)
                 if history.get("records"):
                     history_text = "\n".join([f"- {r['sent_at'][:16]}：{r['content']}" for r in history["records"]])
                     monologue = f"{monologue}\n\n【你最近发过的消息】\n{history_text}" if monologue else f"【你最近发过的消息】\n{history_text}"
-
-                # 3. 判断她离开多久了
+                
                 absent_hours = float(os.environ.get("DESIRE_ABSENT_HOURS", "1"))
-                now_tz = datetime.now(TZ)
-
-                # 4. 判断是否需要发
+                
                 should, reason, template = should_send(drives_snapshot, absent_hours, now_tz)
                 if should:
                     content = await gen_message(reason, drives_snapshot, monologue, absent_hours, now_tz.isoformat())
                     if not content:
-                        content = template
-                    success = await send_bark_notification(content)
-                    if success:
-                        record_sent(reason, content, drives_snapshot)
-                        print(f"[Active Send] Triggered! Reason: {reason} | Content: {content}", flush=True)
+                        content = template or ""
+                    if content:
+                        success = await send_bark_notification(content)
+                        if success:
+                            record_sent(reason, content, drives_snapshot)
                     return True
                 return False
-
+            
             try:
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
@@ -102,8 +113,7 @@ class DesireMCPHTTPHandler(BaseHTTPRequestHandler):
         self.send_header("Connection", "keep-alive")
         self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
-        event = {"name": "astrbot-desire-system", "version": "2.0.1",
-                 "message": "MCP HTTP endpoint is ready."}
+        event = {"name": "astrbot-desire-system", "version": "2.0.1", "message": "MCP ready."}
         self.wfile.write(f"event: ready\ndata: {json.dumps(event, ensure_ascii=False)}\n\n".encode("utf-8"))
         self.wfile.flush()
 
@@ -117,8 +127,7 @@ class DesireMCPHTTPHandler(BaseHTTPRequestHandler):
             return
         try:
             length = int(self.headers.get("Content-Length", "0"))
-            raw = self.rfile.read(length).decode("utf-8")
-            message = json.loads(raw)
+            message = json.loads(self.rfile.read(length).decode("utf-8"))
             response = self.server.mcp.handle(message)
             if response is None:
                 response = {"jsonrpc": "2.0", "result": None, "id": message.get("id")}
@@ -127,13 +136,13 @@ class DesireMCPHTTPHandler(BaseHTTPRequestHandler):
             self._send_json(400, {"jsonrpc": "2.0", "id": None,
                                   "error": {"code": -32700, "message": str(exc)}})
 
-    def log_message(self, fmt: str, *args: Any) -> None:
+    def log_message(self, fmt, *args):
         if os.environ.get("DESIRE_MCP_LOG", ""):
             super().log_message(fmt, *args)
 
 
 class DesireMCPHTTPServer(ThreadingHTTPServer):
-    def __init__(self, server_address: tuple[str, int], handler_class: type[BaseHTTPRequestHandler]):
+    def __init__(self, server_address, handler_class):
         super().__init__(server_address, handler_class)
         self.mcp = DesireMCPServer()
 
