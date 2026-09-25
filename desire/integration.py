@@ -22,7 +22,7 @@ DIARY_DIR = os.environ.get("DESIRE_DIARY_DIR", "memory_daily")
 MONTHLY_DIR = os.environ.get("DESIRE_MONTHLY_DIR", "memory_monthly")
 
 CHAT_MEMORY_LIMIT = 400
-MEMORY_READ_HOURS = 6.0
+MEMORY_READ_HOURS = 1.0
 MONTHLY_BATCH_SIZE = 10
 CORE_MEMORY_THRESHOLD = 5.0
 
@@ -526,7 +526,7 @@ def _local_keyword_match(text: str):
     return None, None
 
 
-# ================= 情感分析（6小时记忆门槛 + 精简返回） =================
+# ================= 情感分析（1小时记忆门槛 + 精简返回） =================
 def analyze_and_apply(text):
     _append_chat_memory(text)
 
