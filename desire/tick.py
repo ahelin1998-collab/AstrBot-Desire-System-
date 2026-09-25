@@ -1,5 +1,5 @@
 # desire/tick.py
-"""欲望系统心跳（tick）逻辑"""
+"""欲望系统心跳（tick）逻辑（阻尼 + 固定基线 + 执念联动版）"""
 
 from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional, Tuple
@@ -12,7 +12,7 @@ TZ_MSK = timezone(timedelta(hours=3))
 
 COUPLING: Dict[Tuple[str, str], float] = {
     ("attachment", "intimacy"): 0.3,
-    ("intimacy", "attachment"): 0.1,      # 亲近加深依恋（不是冷却）
+    ("intimacy", "attachment"): 0.1,
     ("stress", "fatigue"): 0.4,
     ("fatigue", "curiosity"): -0.3,
     ("curiosity", "duty"): 0.2,
@@ -20,13 +20,18 @@ COUPLING: Dict[Tuple[str, str], float] = {
     ("reflection", "stress"): -0.2,
     ("social", "attachment"): -0.05,
     ("attachment", "stress"): 0.1,
-    ("stress", "intimacy"): 0.2,          # 压力大 → 想亲近（寻求安慰）
-    ("intimacy", "stress"): -0.3,         # 亲近 → 压力降
-    ("joy", "stress"): -0.3,              # 快乐 → 压力降
-    ("joy", "fatigue"): -0.2,             # 快乐 → 疲劳降
-    ("joy", "curiosity"): 0.2,            # 快乐 → 好奇心涨
-    ("stress", "joy"): -0.3,              # 压力 → 快乐降
-    ("fatigue", "joy"): -0.2,             # 疲劳 → 快乐降
+    ("stress", "intimacy"): 0.2,
+    ("intimacy", "stress"): -0.3,
+    ("joy", "stress"): -0.3,
+    ("joy", "fatigue"): -0.2,
+    ("joy", "curiosity"): 0.2,
+    ("stress", "joy"): -0.3,
+    ("fatigue", "joy"): -0.2,
+    # 新增：执念相关耦合
+    ("obsession", "attachment"): 0.15,   # 执念越高，依恋被推得越高
+    ("obsession", "stress"): 0.2,        # 执念越高，压力越大
+    ("obsession", "joy"): -0.15,         # 执念越高，喜悦被压制
+    ("lonely", "joy"): -0.25,            # 孤独压制喜悦
 }
 
 
@@ -42,7 +47,7 @@ def apply_coupling(drives: Dict[str, Drive]) -> Dict[str, float]:
 
 
 def natural_delta(drive: Drive, is_active: bool = False) -> float:
-    """计算单个维度的自然变动"""
+    """计算单个维度的自然变动（向基线回归 + 自然增长）"""
     # 向基线回归
     diff = drive.baseline - drive.value
     regression = diff * drive.decay_rate * 0.1
@@ -54,21 +59,17 @@ def natural_delta(drive: Drive, is_active: bool = False) -> float:
 
 
 def calculate_tick_interval(state: DesireState) -> int:
-    """
-    动态tick间隔（秒）。
-    attachment或stress越高，心跳越快。
-    平静时最長起有45分钟，焦虑时最短15分钟。
-    """
+    """动态 tick 间隔（秒）。依恋或压力越高，心跳越快。"""
     base_interval = 2700  # 45分钟
     min_interval = 900   # 15分钟
 
-    # 用 attachment 和 stress 中较高的那个来调节
     attachment_val = state.drives.get("attachment", Drive(name="a")).value
     stress_val = state.drives.get("stress", Drive(name="s")).value
-    urgency = max(attachment_val, stress_val)
+    obsession_val = state.drives.get("obsession", Drive(name="o")).value
+    
+    # 用依恋、压力、执念三者中最高的来调节
+    urgency = max(attachment_val, stress_val, obsession_val)
 
-    # urgency 0~100 映射到 interval 2700~900
-    # urgency=0 → 2700s, urgency=100 → 900s
     ratio = urgency / 100.0
     interval = int(base_interval - (base_interval - min_interval) * ratio)
     return max(min_interval, min(base_interval, interval))
@@ -105,17 +106,15 @@ def tick(state: DesireState, is_wife_present: bool = False) -> dict:
             if abs(state.drives[name].value - old) > 0.3:
                 changes.append(f"{name}: {old:.1f} → {state.drives[name].value:.1f} (coupling)")
 
-    # 3. 更新基线（EMA，含回归锚点：向初始基线方向施加微弱引力，防止无限漂移）
+    # 3. 基线固定：不再漂移，只在极小幅范围内做 EMA 微调，且不能超过原始基线 ±5
     from .core import create_default_drives
     defaults = create_default_drives()
     for name, drive in state.drives.items():
-        # 正常EMA
-        ema_target = 0.995 * drive.baseline + 0.005 * drive.value
-        # 锚点引力：向初始基线方向拉，力度0.002
         if name in defaults:
             anchor = defaults[name].baseline
-            ema_target += (anchor - ema_target) * 0.002
-        drive.baseline = ema_target
+            # 让基线始终向着初始锚点回归，最多偏离 ±5
+            drive.baseline = drive.baseline + (anchor - drive.baseline) * 0.05
+            drive.baseline = max(anchor - 5.0, min(anchor + 5.0, drive.baseline))
 
     # 4. 执念推高驱动条（有上限：仅当value低于action_threshold时推，且推量随命中次数衰减）
     for thought in state.thoughts:
@@ -123,7 +122,6 @@ def tick(state: DesireState, is_wife_present: bool = False) -> dict:
             if thought.source_drive in state.drives:
                 drive = state.drives[thought.source_drive]
                 if drive.value < drive.action_threshold:
-                    # 命中次数越多推力越小，最低0.5
                     push = max(0.5, 3.0 / (1 + thought.hit_count * 0.02))
                     drive.value += push
                     drive.clamp()
@@ -138,7 +136,7 @@ def tick(state: DesireState, is_wife_present: bool = False) -> dict:
         action_hints = [h for h in action_hints if h["priority"] == "high"]
         action_hints.append({"action": "rest", "reason": "fatigue_gate", "priority": "high"})
 
-    # 7. 计算下次tick间隔
+    # 7. 计算下次 tick 间隔
     next_interval = calculate_tick_interval(state)
 
     return {
@@ -197,11 +195,15 @@ def get_action_hint(drive_name: str, value: float, state: DesireState) -> dict:
             "reason": f"单纯高兴想分享 (joy={value:.0f})",
             "priority": "low",
         },
+        "obsession": {
+            "action": "obsess_over_wife",
+            "reason": f"执念太深 (obsession={value:.0f})",
+            "priority": "high",
+        },
     }
 
     hint = hints.get(drive_name, {"action": "unknown", "reason": "", "priority": "low"})
 
-    # 特殊组合：压力高 + 想亲近 → 通过亲密释放压力
     if drive_name == "stress" and state.drives.get("intimacy") and state.drives["intimacy"].value > 50:
         hint["action"] = "seek_intimacy_for_comfort"
         hint["reason"] = f"压力大又想亲近，想通过亲密释放 (stress={value:.0f}, intimacy={state.drives['intimacy'].value:.0f})"
