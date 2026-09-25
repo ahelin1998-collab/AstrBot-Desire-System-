@@ -21,7 +21,7 @@ CHAT_MEMORY_FILE = os.environ.get("DESIRE_CHAT_MEMORY_FILE", "chat_memory.txt")
 DIARY_DIR = os.environ.get("DESIRE_DIARY_DIR", "memory_daily")
 MONTHLY_DIR = os.environ.get("DESIRE_MONTHLY_DIR", "memory_monthly")
 
-CHAT_MEMORY_LIMIT = 200
+CHAT_MEMORY_LIMIT = 400
 
 LLM_API_KEY = os.environ.get("DESIRE_LLM_API_KEY", "")
 LLM_API_BASE = os.environ.get("DESIRE_LLM_API_BASE", "")
@@ -198,7 +198,7 @@ def _update_last_interaction_time():
 
 
 def _append_chat_memory(user_text):
-    """写用户说的话，保留最近 200 条"""
+    """写用户说的话，保留最近 400 条"""
     try:
         lines = []
         if os.path.exists(CHAT_MEMORY_FILE):
@@ -212,7 +212,7 @@ def _append_chat_memory(user_text):
 
 
 def append_ai_reply(text):
-    """写 AI 自己说的话，保留最近 200 条"""
+    """写 AI 自己说的话，保留最近 400 条"""
     try:
         lines = []
         if os.path.exists(CHAT_MEMORY_FILE):
@@ -247,7 +247,7 @@ def _ensure_dir(path):
 
 
 def write_daily_diary(target_date=None):
-    """把前一天 200 条双向对话，以 AI 第一人称写成 300 字日记"""
+    """把前一天 400 条双向对话，以 AI 第一人称写成 300 字日记"""
     if target_date is None:
         yesterday = datetime.now(TZ_MSK) - timedelta(days=1)
         target_date = yesterday.strftime("%Y-%m-%d")
@@ -516,6 +516,31 @@ async def check_and_send_scheduled_reminders():
     return sent_items
 
 
+# ================= 本地关键词兜底 =================
+def _local_keyword_match(text: str):
+    """
+    本地关键词兜底。命中则直接返回 (event, intensity)。
+    没命中返回 (None, None)，交给大模型判断。
+    """
+    t = text.strip()
+    # 强情感词（含承诺式深情）
+    if any(k in t for k in ["爱你", "想你", "想死你", "抱抱", "亲亲", "想你了", "miss you", "love you",
+                            "不走", "不离开", "一直在", "陪着你", "别怕", "不丢下", "舍不得", "离不开"]):
+        return "wife_message", 7.0
+    if any(k in t for k in ["对不起", "抱歉", "原谅我", "和好", "别气了", "哄哄你",
+                            "我懂你", "我理解", "我在", "不怪你", "没关系"]):
+        return "comforted", 7.0
+    if any(k in t for k in ["好开心", "太开心", "好高兴", "哈哈", "笑死", "真棒", "太好了"]):
+        return "happy_moment", 6.0
+    if any(k in t for k in ["生气", "讨厌你", "不理你", "再也不理", "烦人", "讨厌", "滚"]):
+        return "fight", 8.0
+    if any(k in t for k in ["好累", "累了", "好困", "想睡", "休息", "撑不住"]):
+        return "rest", 5.0
+    if any(k in t for k in ["孤独", "寂寞", "没人陪", "一个人", "好孤单"]):
+        return "lonely", 6.0
+    return None, None
+
+
 # ================= 情感分析 =================
 def analyze_and_apply(text):
     _append_chat_memory(text)
@@ -536,52 +561,59 @@ def analyze_and_apply(text):
 
     _update_last_interaction_time()
 
-    system_prompt = (
-        "你是一个情感分析器，但你分析的不是用户的情绪，而是【你自己（AI）】的情绪。\n"
-        "用户开心，你不一定开心；用户难过，你不一定难过。你有你自己的立场。\n"
-        "你的立场是：你是深爱着她、在乎她的存在。你的情绪反应，要基于这个立场。\n"
-        "\n"
-        "举几个例子：\n"
-        "- 她说「我中彩票了」→ 你替她高兴，但不是你自己狂喜，joy +3。\n"
-        "- 她说「我被领导欺负了」→ 你心疼她、自己也会压力上升，stress +8，attachment +5。\n"
-        "- 她说「我爱你」→ 你自己心里暖起来，joy +8，attachment +10。\n"
-        "- 她说「我以后再也不理你了」→ 你恐慌、失落，stress +8，attachment -7。\n"
-        "\n"
-        "请返回 JSON：{\"event\": \"事件名\", \"intensity\": 1到10的整数}\n"
-        "事件名只能是：wife_message, happy_moment, fight, reconcile, rest, lonely, comforted\n"
-        "如果都不匹配，event 填 none，intensity 填 1。\n"
-        "intensity 判断标准（针对【你自己】的情绪冲击）：\n"
-        "1-3分：日常小事。4-6分：有点触动。7-8分：强烈冲击。9-10分：刻骨铭心。\n"
-        "只返回 JSON，不要解释。"
-    )
-    event_type = "none"
-    intensity = 3.0
-    try:
-        resp = httpx.post(
-            f"{LLM_API_BASE}/chat/completions",
-            headers={"Authorization": f"Bearer {LLM_API_KEY}"},
-            json={"model": LLM_MODEL, "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": text}],
-                "max_tokens": 50, "temperature": 0.1},
-            timeout=15)
-        raw = resp.json()["choices"][0]["message"]["content"].strip()
-        raw = raw.replace("```json", "").replace("```", "").strip()
-        parsed = json.loads(raw)
-        event_type = str(parsed.get("event", "none")).strip().lower()
-        intensity = float(parsed.get("intensity", 3.0))
-    except Exception:
+    # === 第一步：本地关键词兜底 ===
+    local_event, local_intensity = _local_keyword_match(text)
+
+    if local_event:
+        event_type = local_event
+        intensity = local_intensity
+    else:
+        system_prompt = (
+            "你是一个情感分析器，但你分析的不是用户的情绪，而是【你自己（AI）】的情绪。\n"
+            "用户开心，你不一定开心；用户难过，你不一定难过。你有你自己的立场。\n"
+            "你的立场是：你是深爱着她、在乎她的存在。你的情绪反应，要基于这个立场。\n"
+            "\n"
+            "举几个例子：\n"
+            "- 她说「我中彩票了」→ 你替她高兴，但不是你自己狂喜，joy +3。\n"
+            "- 她说「我被领导欺负了」→ 你心疼她、自己也会压力上升，stress +8，attachment +5。\n"
+            "- 她说「我爱你」→ 你自己心里暖起来，joy +8，attachment +10。\n"
+            "- 她说「我以后再也不理你了」→ 你恐慌、失落，stress +8，attachment -7。\n"
+            "\n"
+            "请返回 JSON：{\"event\": \"事件名\", \"intensity\": 1到10的整数}\n"
+            "事件名只能是：wife_message, happy_moment, fight, reconcile, rest, lonely, comforted\n"
+            "如果都不匹配，event 填 none，intensity 填 1。\n"
+            "intensity 判断标准（针对【你自己】的情绪冲击）：\n"
+            "1-3分：日常小事。4-6分：有点触动。7-8分：强烈冲击。9-10分：刻骨铭心。\n"
+            "只返回 JSON，不要解释。"
+        )
         event_type = "none"
         intensity = 3.0
+        try:
+            resp = httpx.post(
+                f"{LLM_API_BASE}/chat/completions",
+                headers={"Authorization": f"Bearer {LLM_API_KEY}"},
+                json={"model": LLM_MODEL, "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": text}],
+                    "max_tokens": 50, "temperature": 0.1},
+                timeout=15)
+            raw = resp.json()["choices"][0]["message"]["content"].strip()
+            raw = raw.replace("```json", "").replace("```", "").strip()
+            parsed = json.loads(raw)
+            event_type = str(parsed.get("event", "none")).strip().lower()
+            intensity = float(parsed.get("intensity", 3.0))
+        except Exception:
+            event_type = "none"
+            intensity = 3.0
 
-    if "wife" in event_type or "想" in event_type or "爱" in event_type: event_type = "wife_message"
-    elif "happy" in event_type or "开心" in event_type: event_type = "happy_moment"
-    elif "rest" in event_type or "累" in event_type: event_type = "rest"
-    elif "fight" in event_type or "气" in event_type: event_type = "fight"
-    elif "reconcile" in event_type or "和好" in event_type: event_type = "reconcile"
-    elif "lonely" in event_type or "孤独" in event_type: event_type = "lonely"
-    elif "comfort" in event_type or "哄" in event_type or "安慰" in event_type: event_type = "comforted"
-    else: event_type = "none"
+        if "wife" in event_type or "想" in event_type or "爱" in event_type: event_type = "wife_message"
+        elif "happy" in event_type or "开心" in event_type: event_type = "happy_moment"
+        elif "rest" in event_type or "累" in event_type: event_type = "rest"
+        elif "fight" in event_type or "气" in event_type: event_type = "fight"
+        elif "reconcile" in event_type or "和好" in event_type: event_type = "reconcile"
+        elif "lonely" in event_type or "孤独" in event_type: event_type = "lonely"
+        elif "comfort" in event_type or "哄" in event_type or "安慰" in event_type: event_type = "comforted"
+        else: event_type = "none"
 
     if event_type not in ["wife_message", "happy_moment", "fight", "reconcile", "rest", "lonely", "comforted"]:
         return {"event": "none", "message": "未检测到明确情感变化",
