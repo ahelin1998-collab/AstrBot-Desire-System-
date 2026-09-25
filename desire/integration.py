@@ -303,7 +303,7 @@ def write_daily_diary(target_date=None):
     return {"status": "ok", "date": target_date, "length": len(diary_text)}
 
 
-# ================= 月度压缩（10天一批） =================
+# ================= 月度压缩 =================
 def _list_diaries():
     if not os.path.exists(DIARY_DIR):
         return []
@@ -529,7 +529,6 @@ def _local_keyword_match(text: str):
 
 # ================= 提取最近的新念头 =================
 def _extract_recent_thoughts(state: DesireState) -> str:
-    """提取最近 RECENT_THOUGHT_HOURS 小时内产生的新念头"""
     parts = []
     now = datetime.now(TZ_MSK)
     for t in state.thoughts:
@@ -546,7 +545,7 @@ def _extract_recent_thoughts(state: DesireState) -> str:
     return "【你最近刚想过的事】\n" + "\n".join([f"- {c}" for c in parts])
 
 
-# ================= 情感分析（1小时记忆门槛 + 念头回传） =================
+# ================= 情感分析 =================
 def analyze_and_apply(text):
     _append_chat_memory(text)
 
@@ -627,9 +626,7 @@ def analyze_and_apply(text):
     save_state(state)
     _check_and_write_core_memory(state, event_type, text, changes)
 
-    # ================= 提取最近1小时的新念头 =================
     thought_context = _extract_recent_thoughts(state) or None
-    # =========================================================
 
     return {
         "event": event_type,
@@ -637,3 +634,22 @@ def analyze_and_apply(text):
         "memory_context": memory_context,
         "thought_context": thought_context
     }
+
+
+# ================= 新增：立刻发 Bark =================
+def send_bark_now(content: str) -> dict:
+    """用户主动命令立即发一条 Bark，无视安静时段和冷却"""
+    import asyncio
+    from desire.active_send import send_bark_notification, record_sent, init_table
+    init_table()
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        success = loop.run_until_complete(send_bark_notification(content))
+        loop.close()
+        if success:
+            record_sent("user_command", content, {"source": "manual"})
+            return {"status": "ok", "content": content}
+        return {"status": "failed", "error": "Bark send failed or empty content"}
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
