@@ -10,7 +10,7 @@ from datetime import datetime, timezone, timedelta
 from typing import List, Optional
 from .core import DesireState, Drive, Thought
 
-TZ_MSK = timezone(timedelta(hours=3))
+TZ_BJ = timezone(timedelta(hours=8))
 
 CHAT_MEMORY_FILE = os.environ.get("DESIRE_CHAT_MEMORY_FILE", "chat_memory.txt")
 CORE_MEMORY_FILE = os.environ.get("DESIRE_CORE_MEMORY_FILE", "core_memory.txt")
@@ -26,16 +26,13 @@ OBSESSION_THRESHOLD = 3
 OBSESSION_LIFESPAN_HOURS = 72
 MAX_HITS_BEFORE_RETIRE = 15
 
-# 生成念头的最小间隔（小时）——每小时最多一个
 MIN_THOUGHT_INTERVAL_HOURS = 1.0
-# 用户离开多久内还允许生成念头（小时）
 MAX_USER_ABSENCE_HOURS = 6.0
-# 骰子概率：1.0 = 不再掷骰子，只要前面条件满足就生成
 SPAWN_PROBABILITY = 1.0
 
 
 def generate_thought_id(content: str, drive: str = "memory") -> str:
-    raw = f"{content}_{drive}_{datetime.now(TZ_MSK).isoformat()}"
+    raw = f"{content}_{drive}_{datetime.now(TZ_BJ).isoformat()}"
     return hashlib.md5(raw.encode()).hexdigest()[:8]
 
 
@@ -139,26 +136,25 @@ def _call_llm_for_thought(chat_memory: str, core_memory: str) -> Optional[str]:
 
 
 def maybe_spawn_thought(state: DesireState) -> Optional[Thought]:
-    # 门槛1：用户最近6小时有互动吗
     hours_since = _hours_since_last_interaction()
     if hours_since > MAX_USER_ABSENCE_HOURS:
         return None
 
-    # 门槛2：距离上次生成念头超过1小时吗
     thought_state = _read_last_thought_state()
     now_ts = datetime.now().timestamp()
     hours_since_last_thought = (now_ts - thought_state["last_spawn_ts"]) / 3600.0
     if hours_since_last_thought < MIN_THOUGHT_INTERVAL_HOURS:
         return None
 
-    # 门槛3：聊天记忆有更新吗
     if not os.path.exists(CHAT_MEMORY_FILE):
         return None
     chat_mtime = os.path.getmtime(CHAT_MEMORY_FILE)
     if chat_mtime <= thought_state["last_chat_mtime"]:
         return None
 
-    # 不再掷骰子，直接生成
+    if random.random() > SPAWN_PROBABILITY:
+        return None
+
     chat_memory = _read_recent_chat(50)
     core_memory = _read_core_memory()
 
@@ -195,7 +191,7 @@ def sample_and_update(state: DesireState) -> Optional[Thought]:
     chosen = random.choices(active_thoughts, weights=weights, k=1)[0]
 
     chosen.hit_count += 1
-    chosen.last_hit = datetime.now(TZ_MSK).isoformat()
+    chosen.last_hit = datetime.now(TZ_BJ).isoformat()
 
     if chosen.hit_count >= OBSESSION_THRESHOLD and not chosen.is_obsession:
         current_obsessions = [t for t in state.thoughts if t.is_obsession and not t.resolved]
@@ -206,7 +202,7 @@ def sample_and_update(state: DesireState) -> Optional[Thought]:
 
 
 def decay_thoughts(state: DesireState):
-    now = datetime.now(TZ_MSK)
+    now = datetime.now(TZ_BJ)
     to_remove = []
 
     for thought in state.thoughts:
