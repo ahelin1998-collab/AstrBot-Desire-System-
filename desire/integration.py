@@ -13,7 +13,7 @@ from .thoughts import maybe_spawn_thought, sample_and_update, decay_thoughts
 from .safety import safety_check
 from .monologue import generate_monologue
 
-TZ_MSK = timezone(timedelta(hours=3))
+TZ_BJ = timezone(timedelta(hours=8))
 DB_PATH = os.environ.get("DESIRE_DB_FILE", "desire_system.db")
 LAST_INTERACTION_FILE = os.environ.get("DESIRE_LAST_INTERACTION_FILE", "last_interaction.txt")
 CORE_MEMORY_FILE = os.environ.get("DESIRE_CORE_MEMORY_FILE", "core_memory.txt")
@@ -131,7 +131,7 @@ def log_tick(state, result, monologue, warnings):
     conn.execute("""INSERT INTO desire_log
         (timestamp, tick_count, changes, action_hints, monologue, safety_warnings)
         VALUES (?, ?, ?, ?, ?, ?)""", (
-        datetime.now(TZ_MSK).isoformat(), state.tick_count,
+        datetime.now(TZ_BJ).isoformat(), state.tick_count,
         json.dumps(result.get("changes", []), ensure_ascii=False),
         json.dumps(result.get("action_hints", []), ensure_ascii=False),
         monologue, json.dumps(warnings, ensure_ascii=False)))
@@ -207,7 +207,7 @@ def _append_chat_memory(user_text):
         if os.path.exists(CHAT_MEMORY_FILE):
             with open(CHAT_MEMORY_FILE, "r", encoding="utf-8") as f:
                 lines = f.readlines()
-        lines.append(f"[{datetime.now(TZ_MSK).strftime('%m-%d %H:%M')}] 她说：{user_text}\n")
+        lines.append(f"[{datetime.now(TZ_BJ).strftime('%m-%d %H:%M')}] 她说：{user_text}\n")
         with open(CHAT_MEMORY_FILE, "w", encoding="utf-8") as f:
             f.writelines(lines[-CHAT_MEMORY_LIMIT:])
     except Exception:
@@ -220,7 +220,7 @@ def append_ai_reply(text):
         if os.path.exists(CHAT_MEMORY_FILE):
             with open(CHAT_MEMORY_FILE, "r", encoding="utf-8") as f:
                 lines = f.readlines()
-        lines.append(f"[{datetime.now(TZ_MSK).strftime('%m-%d %H:%M')}] 我说：{text}\n")
+        lines.append(f"[{datetime.now(TZ_BJ).strftime('%m-%d %H:%M')}] 我说：{text}\n")
         with open(CHAT_MEMORY_FILE, "w", encoding="utf-8") as f:
             f.writelines(lines[-CHAT_MEMORY_LIMIT:])
         return {"status": "ok", "written": len(text)}
@@ -230,7 +230,7 @@ def append_ai_reply(text):
 
 def get_sent_history(limit=10, hours_limit=6):
     conn = _get_conn()
-    cutoff_time = (datetime.now(TZ_MSK) - timedelta(hours=hours_limit)).isoformat()
+    cutoff_time = (datetime.now(TZ_BJ) - timedelta(hours=hours_limit)).isoformat()
     try:
         rows = conn.execute(
             "SELECT sent_at, reason, content FROM desire_active_send WHERE sent_at >= ? ORDER BY id DESC LIMIT ?",
@@ -251,7 +251,7 @@ def _ensure_dir(path):
 
 def write_daily_diary(target_date=None):
     if target_date is None:
-        yesterday = datetime.now(TZ_MSK) - timedelta(days=1)
+        yesterday = datetime.now(TZ_BJ) - timedelta(days=1)
         target_date = yesterday.strftime("%Y-%m-%d")
 
     _ensure_dir(DIARY_DIR)
@@ -303,7 +303,7 @@ def write_daily_diary(target_date=None):
     return {"status": "ok", "date": target_date, "length": len(diary_text)}
 
 
-# ================= 月度压缩 =================
+# ================= 月度压缩（10天一批） =================
 def _list_diaries():
     if not os.path.exists(DIARY_DIR):
         return []
@@ -396,7 +396,7 @@ def _read_relevant_memory():
         except Exception:
             pass
 
-    yesterday = (datetime.now(TZ_MSK) - timedelta(days=1)).strftime("%Y-%m-%d")
+    yesterday = (datetime.now(TZ_BJ) - timedelta(days=1)).strftime("%Y-%m-%d")
     diary_path = os.path.join(DIARY_DIR, f"{yesterday}.txt")
     if os.path.exists(diary_path):
         try:
@@ -445,7 +445,7 @@ def _check_and_write_core_memory(state, event_type, user_text, changes):
                 ai_feeling = f"{drive_name} {direction}了 {abs(diff):.1f} 点。"
             try:
                 with open(CORE_MEMORY_FILE, "a", encoding="utf-8") as f:
-                    f.write(f"\n【{datetime.now(TZ_MSK).strftime('%Y-%m-%d %H:%M')} 深刻记忆】\n")
+                    f.write(f"\n【{datetime.now(TZ_BJ).strftime('%Y-%m-%d %H:%M')} 深刻记忆】\n")
                     f.write(f"她说了：「{user_text}」\n")
                     f.write(f"我的情绪：{drive_name} 从 {old_val:.0f} {direction}到 {new_val:.0f}\n")
                     f.write(f"我当时的心声：{ai_feeling}\n")
@@ -464,7 +464,7 @@ def add_scheduled_reminder(content, scheduled_time_iso):
 
 
 async def check_and_send_scheduled_reminders():
-    now_iso = datetime.now(TZ_MSK).isoformat()
+    now_iso = datetime.now(TZ_BJ).isoformat()
     conn = _get_conn()
     rows = conn.execute(
         "SELECT id, content FROM desire_scheduled_reminders WHERE is_sent = 0 AND scheduled_time <= ?",
@@ -530,7 +530,7 @@ def _local_keyword_match(text: str):
 # ================= 提取最近的新念头 =================
 def _extract_recent_thoughts(state: DesireState) -> str:
     parts = []
-    now = datetime.now(TZ_MSK)
+    now = datetime.now(TZ_BJ)
     for t in state.thoughts:
         if t.resolved:
             continue
