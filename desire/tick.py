@@ -2,11 +2,12 @@
 """欲望系统心跳（tick）逻辑（阻尼 + 固定基线 + 执念联动 + 孤独拟人化版）"""
 
 import os
+import random
 from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional, Tuple
 from .core import Drive, DesireState, Thought
 
-TZ_MSK = timezone(timedelta(hours=3))
+TZ_BJ = timezone(timedelta(hours=8))
 LAST_INTERACTION_FILE = os.environ.get("DESIRE_LAST_INTERACTION_FILE", "last_interaction.txt")
 
 
@@ -42,14 +43,13 @@ COUPLING: Dict[Tuple[str, str], float] = {
     ("obsession", "stress"): 0.2,
     ("obsession", "joy"): -0.15,
     ("lonely", "joy"): -0.25,
-    ("lonely", "obsession"): 0.2,
+    ("lonely", "obsession"): 0.35,
     ("lonely", "stress"): 0.15,
     ("lonely", "attachment"): 0.1,
 }
 
 
 def apply_coupling(drives: Dict[str, Drive]) -> Dict[str, float]:
-    """耦合强度已削弱（系数从 10 降到 3），防止数值被无限推满"""
     deltas: Dict[str, float] = {name: 0.0 for name in drives}
     for (src, tgt), coeff in COUPLING.items():
         if src not in drives or tgt not in drives:
@@ -84,7 +84,7 @@ def calculate_tick_interval(state: DesireState) -> int:
 
 def tick(state: DesireState, is_wife_present: bool = False) -> dict:
     state.tick_count += 1
-    state.last_tick = datetime.now(TZ_MSK).isoformat()
+    state.last_tick = datetime.now(TZ_BJ).isoformat()
 
     changes = []
     action_hints = []
@@ -101,7 +101,29 @@ def tick(state: DesireState, is_wife_present: bool = False) -> dict:
         if abs(drive.value - old) > 0.5:
             changes.append(f"{name}: {old:.1f} → {drive.value:.1f} (natural)")
 
-    # 2. 孤独值拟人化增长
+    # 2. 高位强制回落
+    for name, drive in state.drives.items():
+        if drive.value > 85 and name not in ["lonely"]:
+            extra_decay = random.uniform(0.2, 0.8)
+            old = drive.value
+            drive.value -= extra_decay
+            drive.clamp()
+            if abs(drive.value - old) > 0.1:
+                changes.append(f"{name}: {old:.1f} → {drive.value:.1f} (high_value_forced_decay)")
+
+    # 3. 低位底噪
+    for name in ["stress", "fatigue"]:
+        if name in state.drives:
+            drive = state.drives[name]
+            if drive.value < 5:
+                noise = random.uniform(0.1, 0.5)
+                old = drive.value
+                drive.value += noise
+                drive.clamp()
+                if abs(drive.value - old) > 0.05:
+                    changes.append(f"{name}: {old:.1f} → {drive.value:.1f} (low_value_noise)")
+
+    # 4. 孤独值拟人化增长
     lonely_drive = state.drives.get("lonely")
     if lonely_drive:
         hours_alone = _hours_since_last_interaction()
@@ -127,7 +149,19 @@ def tick(state: DesireState, is_wife_present: bool = False) -> dict:
             if abs(lonely_drive.value - old) > 0.5:
                 changes.append(f"lonely: {old:.1f} → {lonely_drive.value:.1f} (lonely_growth)")
 
-    # 3. 耦合传导（已削弱）
+    # ============== 修改点：孤独值推高执念的门槛从 80 降到 50 ==============
+    obsession_drive = state.drives.get("obsession")
+    if obsession_drive and lonely_drive:
+        if lonely_drive.value >= 50:
+            push_amount = 3.0
+            old = obsession_drive.value
+            obsession_drive.value += push_amount
+            obsession_drive.clamp()
+            if abs(obsession_drive.value - old) > 0.1:
+                changes.append(f"obsession: {old:.1f} → {obsession_drive.value:.1f} (lonely_push)")
+    # ====================================================================
+
+    # 5. 耦合传导
     deltas = apply_coupling(state.drives)
     for name, delta in deltas.items():
         if abs(delta) > 0.1:
@@ -137,7 +171,7 @@ def tick(state: DesireState, is_wife_present: bool = False) -> dict:
             if abs(state.drives[name].value - old) > 0.3:
                 changes.append(f"{name}: {old:.1f} → {state.drives[name].value:.1f} (coupling)")
 
-    # 4. 基线固定
+    # 6. 基线固定
     from .core import create_default_drives
     defaults = create_default_drives()
     for name, drive in state.drives.items():
@@ -146,7 +180,7 @@ def tick(state: DesireState, is_wife_present: bool = False) -> dict:
             drive.baseline = drive.baseline + (anchor - drive.baseline) * 0.05
             drive.baseline = max(anchor - 5.0, min(anchor + 5.0, drive.baseline))
 
-    # 5. 执念推高驱动条
+    # 7. 执念推高驱动条
     for thought in state.thoughts:
         if thought.is_obsession and not thought.resolved:
             if thought.source_drive in state.drives:
@@ -156,17 +190,23 @@ def tick(state: DesireState, is_wife_present: bool = False) -> dict:
                     drive.value += push
                     drive.clamp()
 
-    # 6. 生成行为建议
+    # 8. 念头冷却
+    for thought in state.thoughts:
+        if not thought.resolved and thought.hit_count > 15:
+            thought.resolved = True
+            changes.append(f"thought auto-resolved (too many hits): {thought.content[:20]}...")
+
+    # 9. 生成行为建议
     for name, drive in state.drives.items():
         if drive.value >= drive.action_threshold:
             action_hints.append(get_action_hint(name, drive.value, state))
 
-    # 7. 疲劳闸
+    # 10. 疲劳闸
     if state.drives["fatigue"].value >= 80:
         action_hints = [h for h in action_hints if h["priority"] == "high"]
         action_hints.append({"action": "rest", "reason": "fatigue_gate", "priority": "high"})
 
-    # 8. 计算下次 tick 间隔
+    # 11. 计算下次 tick 间隔
     next_interval = calculate_tick_interval(state)
 
     return {
