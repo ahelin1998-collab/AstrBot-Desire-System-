@@ -50,7 +50,6 @@ class DesireMCPHTTPHandler(BaseHTTPRequestHandler):
         if path == "/cron/check":
             async def do_check():
                 init_table()
-                # 0. 凌晨 0-1 点，写昨天的日记 + 尝试月度压缩
                 now_tz = datetime.now(TZ)
                 if now_tz.hour == 0:
                     try:
@@ -58,24 +57,22 @@ class DesireMCPHTTPHandler(BaseHTTPRequestHandler):
                         try_monthly_compression()
                     except Exception:
                         pass
-                
-                # 1. 先检查有没有到期的定时提醒
+
                 sent_reminders = await check_and_send_scheduled_reminders()
                 if sent_reminders:
                     return True
-                
-                # 2. 跑心跳
+
                 tick_result = run_tick()
                 drives_snapshot = tick_result.get("drives_snapshot", {})
                 monologue = tick_result.get("monologue", "")
-                
+
                 history = get_sent_history(3)
                 if history.get("records"):
                     history_text = "\n".join([f"- {r['sent_at'][:16]}：{r['content']}" for r in history["records"]])
                     monologue = f"{monologue}\n\n【你最近发过的消息】\n{history_text}" if monologue else f"【你最近发过的消息】\n{history_text}"
-                
+
                 absent_hours = float(os.environ.get("DESIRE_ABSENT_HOURS", "1"))
-                
+
                 should, reason, template = should_send(drives_snapshot, absent_hours, now_tz)
                 if should:
                     content = await gen_message(reason, drives_snapshot, monologue, absent_hours, now_tz.isoformat())
@@ -85,9 +82,11 @@ class DesireMCPHTTPHandler(BaseHTTPRequestHandler):
                         success = await send_bark_notification(content)
                         if success:
                             record_sent(reason, content, drives_snapshot)
-                    return True
+                            return True
+                    # 没发出去或者内容为空，老老实实返回 False，不再欺骗系统
+                    return False
                 return False
-            
+
             try:
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
