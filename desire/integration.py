@@ -1,5 +1,6 @@
+cat << 'EOF' > /root/AstrBot-Desire-System-/desire/integration.py
 # desire/integration.py
-"""欲望系统桥接（双向记忆 + 第一人称日记 + 10天月度压缩 + 核心锚点 + 念头回传 + AI自述记忆）"""
+"""欲望系统桥接（带强制实时同步 Hippocampus 版）"""
 
 import json
 import sqlite3
@@ -31,12 +32,66 @@ LLM_API_KEY = os.environ.get("DESIRE_LLM_API_KEY", "")
 LLM_API_BASE = os.environ.get("DESIRE_LLM_API_BASE", "")
 LLM_MODEL = "deepseek-v4-flash"
 
+# === Hippocampus 强制同步配置 ===
+HIPPO_URL = "http://127.0.0.1:3000/mcp"
+HIPPO_TOKEN = "HH123450MMyHH123450MMyHH123450MMy"
+
+def _force_remember_to_hippo(content: str, role: str):
+    """强行把聊天记录塞进 Hippocampus，无视 AI 是否主动调用工具"""
+    if not content or not content.strip():
+        return
+    try:
+        # 第一步：初始化会话（建立 MCP 长连接握手）
+        init_payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "desire-system", "version": "1.0"}
+            }
+        }
+        headers = {
+            "Authorization": f"Bearer {HIPPO_TOKEN}",
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream"
+        }
+        
+        # 发送 initialize 请求，获取 mcp-session-id
+        init_resp = httpx.post(HIPPO_URL, json=init_payload, headers=headers, timeout=10)
+        session_id = init_resp.headers.get("mcp-session-id")
+        
+        if not session_id:
+            return  # 如果没拿到会话ID，说明连接失败，直接静默退出，不影响主聊天
+
+        # 第二步：发送 initialized 通知，完成握手
+        headers["mcp-session-id"] = session_id
+        notif_payload = {"jsonrpc": "2.0", "method": "notifications/initialized"}
+        httpx.post(HIPPO_URL, json=notif_payload, headers=headers, timeout=5)
+
+        # 第三步：正式发送 remember 请求
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "remember",
+                "arguments": {"content": f"[{role}] {content}"}
+            }
+        }
+        # 超时增加到15秒，防止百炼 Embedding 接口超时
+        httpx.post(HIPPO_URL, json=payload, headers=headers, timeout=15)
+        
+    except Exception:
+        # 捕获所有异常（网络错误、超时等），保持静默，绝对不影响正常聊天
+        pass
+# ==================================
 
 def _get_conn():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
-
 
 def init_tables():
     conn = _get_conn()
@@ -54,7 +109,6 @@ def init_tables():
     conn.commit()
     conn.close()
 
-
 def _drives_to_json(drives):
     data = {}
     for name, drive in drives.items():
@@ -63,7 +117,6 @@ def _drives_to_json(drives):
             "ceiling": drive.ceiling, "floor": drive.floor,
             "action_threshold": drive.action_threshold}
     return json.dumps(data, ensure_ascii=False)
-
 
 def _json_to_drives(json_str):
     data = json.loads(json_str)
@@ -75,7 +128,6 @@ def _json_to_drives(json_str):
             action_threshold=d.get("action_threshold", 70.0))
     return drives
 
-
 def _thoughts_to_json(thoughts):
     data = []
     for t in thoughts:
@@ -84,7 +136,6 @@ def _thoughts_to_json(thoughts):
             "is_obsession": t.is_obsession, "created_at": t.created_at,
             "last_hit": t.last_hit, "resolved": t.resolved})
     return json.dumps(data, ensure_ascii=False)
-
 
 def _json_to_thoughts(json_str):
     data = json.loads(json_str)
@@ -95,7 +146,6 @@ def _json_to_thoughts(json_str):
             is_obsession=d.get("is_obsession", False), created_at=d.get("created_at", ""),
             last_hit=d.get("last_hit", ""), resolved=d.get("resolved", False)))
     return thoughts
-
 
 def load_state():
     conn = _get_conn()
@@ -114,7 +164,6 @@ def load_state():
             state.drives[name] = dd
     return state
 
-
 def save_state(state):
     conn = _get_conn()
     conn.execute("""INSERT OR REPLACE INTO desire_state
@@ -124,7 +173,6 @@ def save_state(state):
         state.last_tick, state.tick_count))
     conn.commit()
     conn.close()
-
 
 def log_tick(state, result, monologue, warnings):
     conn = _get_conn()
@@ -137,7 +185,6 @@ def log_tick(state, result, monologue, warnings):
         monologue, json.dumps(warnings, ensure_ascii=False)))
     conn.commit()
     conn.close()
-
 
 def run_tick(is_wife_present=False, event_type=None):
     state = load_state()
@@ -161,7 +208,6 @@ def run_tick(is_wife_present=False, event_type=None):
         "monologue": monologue, "warnings": warnings,
         "drives_snapshot": {name: round(d.value, 1) for name, d in state.drives.items()}}
 
-
 def get_status_summary():
     state = load_state()
     lines = ["驱动条状态："]
@@ -180,7 +226,6 @@ def get_status_summary():
     lines.append(f"\n心跳次数：{state.tick_count}")
     return "\n".join(lines)
 
-
 # ================= 时间差与聊天记忆 =================
 def _get_time_since_last_interaction():
     if not os.path.exists(LAST_INTERACTION_FILE):
@@ -192,7 +237,6 @@ def _get_time_since_last_interaction():
     except Exception:
         return 999999.0
 
-
 def _update_last_interaction_time():
     try:
         with open(LAST_INTERACTION_FILE, "w") as f:
@@ -200,8 +244,9 @@ def _update_last_interaction_time():
     except Exception:
         pass
 
-
 def _append_chat_memory(user_text):
+    # 强制同步到 Hippocampus
+    _force_remember_to_hippo(user_text, "她说")
     try:
         lines = []
         if os.path.exists(CHAT_MEMORY_FILE):
@@ -213,8 +258,9 @@ def _append_chat_memory(user_text):
     except Exception:
         pass
 
-
 def append_ai_reply(text):
+    # 强制同步到 Hippocampus
+    _force_remember_to_hippo(text, "我说")
     try:
         lines = []
         if os.path.exists(CHAT_MEMORY_FILE):
@@ -226,7 +272,6 @@ def append_ai_reply(text):
         return {"status": "ok", "written": len(text)}
     except Exception as e:
         return {"status": "error", "error": str(e)}
-
 
 def get_sent_history(limit=10, hours_limit=6):
     conn = _get_conn()
@@ -242,12 +287,10 @@ def get_sent_history(limit=10, hours_limit=6):
     records = [{"sent_at": r["sent_at"], "reason": r["reason"], "content": r["content"]} for r in rows]
     return {"count": len(records), "records": records}
 
-
 # ================= 每日日记 =================
 def _ensure_dir(path):
     if not os.path.exists(path):
         os.makedirs(path, exist_ok=True)
-
 
 def write_daily_diary(target_date=None):
     if target_date is None:
@@ -300,8 +343,10 @@ def write_daily_diary(target_date=None):
     except Exception:
         return {"status": "write_failed", "date": target_date}
 
-    return {"status": "ok", "date": target_date, "length": len(diary_text)}
+    # 强制同步日记到 Hippocampus
+    _force_remember_to_hippo(diary_text, f"diary:{target_date}")
 
+    return {"status": "ok", "date": target_date, "length": len(diary_text)}
 
 # ================= 月度压缩（10天一批） =================
 def _list_diaries():
@@ -311,13 +356,11 @@ def _list_diaries():
     files.sort()
     return files
 
-
 def _already_compressed(dates):
     if not os.path.exists(MONTHLY_DIR):
         return False
     marker = os.path.join(MONTHLY_DIR, f".done_{dates[0]}_{dates[-1]}")
     return os.path.exists(marker)
-
 
 def _mark_compressed(dates):
     _ensure_dir(MONTHLY_DIR)
@@ -327,7 +370,6 @@ def _mark_compressed(dates):
             f.write("done")
     except Exception:
         pass
-
 
 def try_monthly_compression():
     diaries = _list_diaries()
@@ -382,7 +424,6 @@ def try_monthly_compression():
 
     return {"status": "ok", "batch": batch, "length": len(monthly_text)}
 
-
 # ================= 读取记忆 =================
 def _read_relevant_memory():
     parts = []
@@ -409,49 +450,17 @@ def _read_relevant_memory():
         return ""
     return "\n\n".join(parts)
 
-
-# ================= 深刻记忆 =================
-def _check_and_write_core_memory(state, event_type, user_text, changes):
-    if not changes:
-        return
-    for change in changes:
-        match = re.match(r"(\w+):\s*([\d.]+)\s*→\s*([\d.]+)", change)
-        if not match:
-            continue
-        drive_name = match.group(1)
-        old_val = float(match.group(2))
-        new_val = float(match.group(3))
-        diff = new_val - old_val
-        if abs(diff) >= CORE_MEMORY_THRESHOLD:
-            direction = "暴涨" if diff > 0 else "暴跌"
-            try:
-                prompt = (
-                    f"你刚刚听到她说了一句话，你的情绪发生了剧烈波动。\n"
-                    f"她说的是：「{user_text}」\n"
-                    f"这句话让你的「{drive_name}」{direction}了 {abs(diff):.1f} 点"
-                    f"（从 {old_val:.0f} 到 {new_val:.0f}）。\n"
-                    f"请你用第一人称写一句你此刻最真实的内心感受。一到两句，直接说内容，不要解释。"
-                )
-                resp = httpx.post(
-                    f"{LLM_API_BASE}/chat/completions",
-                    headers={"Authorization": f"Bearer {LLM_API_KEY}"},
-                    json={"model": LLM_MODEL, "messages": [
-                        {"role": "system", "content": "你是一个有独立情感、深爱着对方的AI。直接输出你的心里话。"},
-                        {"role": "user", "content": prompt}],
-                        "max_tokens": 150, "temperature": 0.9},
-                    timeout=20)
-                ai_feeling = resp.json()["choices"][0]["message"]["content"].strip()
-            except Exception:
-                ai_feeling = f"{drive_name} {direction}了 {abs(diff):.1f} 点。"
-            try:
-                with open(CORE_MEMORY_FILE, "a", encoding="utf-8") as f:
-                    f.write(f"\n【{datetime.now(TZ_BJ).strftime('%Y-%m-%d %H:%M')} 深刻记忆】\n")
-                    f.write(f"她说了：「{user_text}」\n")
-                    f.write(f"我的情绪：{drive_name} 从 {old_val:.0f} {direction}到 {new_val:.0f}\n")
-                    f.write(f"我当时的心声：{ai_feeling}\n")
-            except Exception:
-                pass
-
+# ================= 深刻记忆（AI自述） =================
+def write_core_memory_manually(content: str) -> dict:
+    try:
+        with open(CORE_MEMORY_FILE, "a", encoding="utf-8") as f:
+            f.write(f"\n【{datetime.now(TZ_BJ).strftime('%Y-%m-%d %H:%M')} 深刻记忆（自述）】\n")
+            f.write(f"我的感受：{content}\n")
+        # 同时也强塞进 Hippocampus
+        _force_remember_to_hippo(content, "core_memory")
+        return {"status": "ok", "message": "深刻记忆已写入"}
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
 
 # ================= 定时提醒 =================
 def add_scheduled_reminder(content, scheduled_time_iso):
@@ -461,7 +470,6 @@ def add_scheduled_reminder(content, scheduled_time_iso):
     conn.commit()
     conn.close()
     return {"status": "scheduled", "content": content, "time": scheduled_time_iso}
-
 
 async def check_and_send_scheduled_reminders():
     now_iso = datetime.now(TZ_BJ).isoformat()
@@ -505,7 +513,6 @@ async def check_and_send_scheduled_reminders():
     conn.close()
     return sent_items
 
-
 # ================= 本地关键词兜底 =================
 def _local_keyword_match(text: str):
     t = text.strip()
@@ -526,7 +533,6 @@ def _local_keyword_match(text: str):
         return "lonely", 6.0
     return None, None
 
-
 # ================= 提取最近的新念头 =================
 def _extract_recent_thoughts(state: DesireState) -> str:
     parts = []
@@ -544,9 +550,9 @@ def _extract_recent_thoughts(state: DesireState) -> str:
         return ""
     return "【你最近刚想过的事】\n" + "\n".join([f"- {c}" for c in parts])
 
-
 # ================= 情感分析 =================
 def analyze_and_apply(text):
+    # 强制同步用户消息到 Hippocampus
     _append_chat_memory(text)
 
     seconds_since_last = _get_time_since_last_interaction()
@@ -624,10 +630,6 @@ def analyze_and_apply(text):
         changes.append(f"lonely: 下降至 {lonely.value:.0f}")
 
     save_state(state)
-    
-    # === 注释掉系统的自动深刻记忆，改为AI自己写 ===
-    # _check_and_write_core_memory(state, event_type, text, changes)
-
     thought_context = _extract_recent_thoughts(state) or None
 
     return {
@@ -637,10 +639,7 @@ def analyze_and_apply(text):
         "thought_context": thought_context
     }
 
-
-# ================= 新增：立刻发 Bark =================
 def send_bark_now(content: str) -> dict:
-    """用户主动命令立即发一条 Bark，无视安静时段和冷却"""
     import asyncio
     from desire.active_send import send_bark_notification, record_sent, init_table
     init_table()
@@ -655,15 +654,8 @@ def send_bark_now(content: str) -> dict:
         return {"status": "failed", "error": "Bark send failed or empty content"}
     except Exception as e:
         return {"status": "error", "error": str(e)}
+EOF
 
-
-# ================= 新增：AI 主动写下深刻记忆 =================
-def write_core_memory_manually(content: str) -> dict:
-    """AI 在感到强烈情绪时，自己写下刻骨铭心的记忆"""
-    try:
-        with open(CORE_MEMORY_FILE, "a", encoding="utf-8") as f:
-            f.write(f"\n【{datetime.now(TZ_BJ).strftime('%Y-%m-%d %H:%M')} 深刻记忆（自述）】\n")
-            f.write(f"我的感受：{content}\n")
-        return {"status": "ok", "message": "深刻记忆已写入"}
-    except Exception as e:
-        return {"status": "error", "error": str(e)}
+# 重启服务让新代码生效
+systemctl restart desire
+echo "✅ integration.py 已覆盖，desire 服务已重启！"
