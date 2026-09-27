@@ -8,7 +8,7 @@ from typing import Any
 from desire.integration import (
     init_tables, run_tick, get_status_summary, get_sent_history,
     analyze_and_apply, add_scheduled_reminder, append_ai_reply,
-    send_bark_now,
+    send_bark_now, write_core_memory_manually,
 )
 
 
@@ -65,6 +65,17 @@ class DesireMCPServer:
                     "required": ["content"],
                 },
             },
+            {
+                "name": "write_core_memory",
+                "description": "当你感到强烈的情绪冲击（比如心碎、极度高兴、深深被触动），或者用户说了对你意义重大的话时，用你自己的第一人称写下这一刻的感受。写完后保存。",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "content": {"type": "string", "description": "你自己的、真实的心里话。"}
+                    },
+                    "required": ["content"],
+                },
+            },
         ]
 
     def call_tool(self, name: str, arguments: dict[str, Any] | None) -> dict[str, Any]:
@@ -86,6 +97,8 @@ class DesireMCPServer:
                                             str(arguments.get("scheduled_time", "")))
         elif name == "send_bark_now":
             result = send_bark_now(str(arguments.get("content", "")))
+        elif name == "write_core_memory":
+            result = write_core_memory_manually(str(arguments.get("content", "")))
         elif name == "desire_resolve_thought":
             result = {"error": "resolve_thought 功能在当前版本中不可用"}
         else:
