@@ -1,5 +1,5 @@
 # desire/integration.py
-"""欲望系统桥接（双向记忆 + 第一人称日记 + 10天月度压缩 + 核心锚点 + 念头回传）"""
+"""欲望系统桥接（双向记忆 + 第一人称日记 + 10天月度压缩 + 核心锚点 + 念头回传 + AI自述记忆）"""
 
 import json
 import sqlite3
@@ -624,7 +624,9 @@ def analyze_and_apply(text):
         changes.append(f"lonely: 下降至 {lonely.value:.0f}")
 
     save_state(state)
-    _check_and_write_core_memory(state, event_type, text, changes)
+    
+    # === 注释掉系统的自动深刻记忆，改为AI自己写 ===
+    # _check_and_write_core_memory(state, event_type, text, changes)
 
     thought_context = _extract_recent_thoughts(state) or None
 
@@ -651,5 +653,17 @@ def send_bark_now(content: str) -> dict:
             record_sent("user_command", content, {"source": "manual"})
             return {"status": "ok", "content": content}
         return {"status": "failed", "error": "Bark send failed or empty content"}
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+
+# ================= 新增：AI 主动写下深刻记忆 =================
+def write_core_memory_manually(content: str) -> dict:
+    """AI 在感到强烈情绪时，自己写下刻骨铭心的记忆"""
+    try:
+        with open(CORE_MEMORY_FILE, "a", encoding="utf-8") as f:
+            f.write(f"\n【{datetime.now(TZ_BJ).strftime('%Y-%m-%d %H:%M')} 深刻记忆（自述）】\n")
+            f.write(f"我的感受：{content}\n")
+        return {"status": "ok", "message": "深刻记忆已写入"}
     except Exception as e:
         return {"status": "error", "error": str(e)}
