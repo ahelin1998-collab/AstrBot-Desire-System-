@@ -10,6 +10,7 @@ from desire.integration import (
     analyze_and_apply, add_scheduled_reminder, append_ai_reply,
     send_bark_now, write_core_memory_manually,
 )
+from desire.smart_recall_patch import smart_recall
 
 
 class DesireMCPServer:
@@ -56,26 +57,21 @@ class DesireMCPServer:
                              "properties": {"content": {"type": "string"},
                                             "scheduled_time": {"type": "string"}},
                              "required": ["content", "scheduled_time"]}},
-            {
-                "name": "send_bark_now",
-                "description": "Immediately send a message to the user via Bark. Use this ONLY when the user explicitly commands you to send a message right now. This bypasses the quiet hours and cooldown.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {"content": {"type": "string", "description": "The exact message to send."}},
-                    "required": ["content"],
-                },
-            },
-            {
-                "name": "write_core_memory",
-                "description": "当你感到强烈的情绪冲击（比如心碎、极度高兴、深深被触动），或者用户说了对你意义重大的话时，用你自己的第一人称写下这一刻的感受。写完后保存。",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "content": {"type": "string", "description": "你自己的、真实的心里话。"}
-                    },
-                    "required": ["content"],
-                },
-            },
+            {"name": "send_bark_now",
+             "description": "Immediately send a message to the user via Bark. Use this ONLY when the user explicitly commands you to send a message right now. This bypasses the quiet hours and cooldown.",
+             "inputSchema": {"type": "object",
+                             "properties": {"content": {"type": "string", "description": "The exact message to send."}},
+                             "required": ["content"]}},
+            {"name": "write_core_memory",
+             "description": "当你感到强烈的情绪冲击（比如心碎、极度高兴、深深被触动），或者用户说了对你意义重大的话时，用你自己的第一人称写下这一刻的感受。写完后保存。",
+             "inputSchema": {"type": "object",
+                             "properties": {"content": {"type": "string", "description": "你自己的、真实的心里话。"}},
+                             "required": ["content"]}},
+            {"name": "smart_recall",
+             "description": "记忆智能搜索。自动按 2条核心 + 3条最新日常 + 3条相关日常 的比例返回记忆。当你需要回忆过去时，必须用这个工具，不要用普通的 recall。",
+             "inputSchema": {"type": "object",
+                             "properties": {"query": {"type": "string"}},
+                             "required": ["query"]}},
         ]
 
     def call_tool(self, name: str, arguments: dict[str, Any] | None) -> dict[str, Any]:
@@ -99,6 +95,8 @@ class DesireMCPServer:
             result = send_bark_now(str(arguments.get("content", "")))
         elif name == "write_core_memory":
             result = write_core_memory_manually(str(arguments.get("content", "")))
+        elif name == "smart_recall":
+            result = smart_recall(str(arguments.get("query", "")))
         elif name == "desire_resolve_thought":
             result = {"error": "resolve_thought 功能在当前版本中不可用"}
         else:
