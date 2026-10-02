@@ -1,3 +1,4 @@
+cat << 'EOF' > /root/AstrBot-Desire-System-/desire/smart_recall_patch.py
 import json
 import httpx
 import os
@@ -31,11 +32,28 @@ def smart_recall(query: str, limit: int = 8) -> dict:
     new_daily = []
     old_daily = []
 
+    # === 关键修复：建立 MCP 会话握手 ===
+    headers = {
+        "Authorization": "Bearer HH123450MMyHH123450MMyHH123450MMy",
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream"
+    }
+    try:
+        init_payload = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "smart-recall", "version": "1.0"}}}
+        init_resp = httpx.post("http://127.0.0.1:3000/mcp", json=init_payload, headers=headers, timeout=10)
+        session_id = init_resp.headers.get("mcp-session-id")
+        if session_id:
+            headers["mcp-session-id"] = session_id
+            httpx.post("http://127.0.0.1:3000/mcp", json={"jsonrpc": "2.0", "method": "notifications/initialized"}, headers=headers, timeout=5)
+    except Exception:
+        pass # 握手失败也继续，看后面会不会奇迹发生
+    # ===================================
+
     try:
         r = httpx.post(
             "http://127.0.0.1:3000/mcp",
-            headers={"Authorization": "Bearer HH123450MMyHH123450MMyHH123450MMy", "Content-Type": "application/json"},
-            json={"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            headers=headers,
+            json={"jsonrpc": "2.0", "id": 2, "method": "tools/call",
                   "params": {"name": "recall", "arguments": {"query": query + " core", "limit": 5}}},
             timeout=15
         )
@@ -58,8 +76,8 @@ def smart_recall(query: str, limit: int = 8) -> dict:
     try:
         r = httpx.post(
             "http://127.0.0.1:3000/mcp",
-            headers={"Authorization": "Bearer HH123450MMyHH123450MMyHH123450MMy", "Content-Type": "application/json"},
-            json={"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            headers=headers,
+            json={"jsonrpc": "2.0", "id": 3, "method": "tools/call",
                   "params": {"name": "recall", "arguments": {"query": query + " diary", "limit": 12}}},
             timeout=15
         )
@@ -74,3 +92,10 @@ def smart_recall(query: str, limit: int = 8) -> dict:
 
     all_results = core_results + new_daily + old_daily
     return {"count": len(all_results), "records": all_results}
+EOF
+
+# 重启 Desire 服务
+systemctl restart desire
+sleep 3
+systemctl status desire --no-pager -l | head -n 10
+echo "✅ 2+3+3 逻辑已恢复，且加入握手协议！"
