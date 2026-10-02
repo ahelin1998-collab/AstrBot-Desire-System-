@@ -22,7 +22,11 @@ CHAT_MEMORY_FILE = os.environ.get("DESIRE_CHAT_MEMORY_FILE", "chat_memory.txt")
 DIARY_DIR = os.environ.get("DESIRE_DIARY_DIR", "memory_daily")
 MONTHLY_DIR = os.environ.get("DESIRE_MONTHLY_DIR", "memory_monthly")
 
-CHAT_MEMORY_LIMIT = 400
+# 1. 聊天记录文件最多保留 5000 行
+CHAT_MEMORY_LIMIT = 5000
+# 2. 写日记时，只读取最后 400 行给大模型总结
+DIARY_READ_LIMIT = 400
+
 MEMORY_READ_HOURS = 1.0
 MONTHLY_BATCH_SIZE = 10
 CORE_MEMORY_THRESHOLD = 5.0
@@ -41,7 +45,6 @@ def _force_remember_to_hippo(content: str, role: str):
     if not content or not content.strip():
         return
     try:
-        # 第一步：初始化会话（建立 MCP 长连接握手）
         init_payload = {
             "jsonrpc": "2.0",
             "id": 1,
@@ -57,20 +60,13 @@ def _force_remember_to_hippo(content: str, role: str):
             "Content-Type": "application/json",
             "Accept": "application/json, text/event-stream"
         }
-        
-        # 发送 initialize 请求，获取 mcp-session-id
         init_resp = httpx.post(HIPPO_URL, json=init_payload, headers=headers, timeout=10)
         session_id = init_resp.headers.get("mcp-session-id")
-        
         if not session_id:
-            return  # 如果没拿到会话ID，说明连接失败，直接静默退出，不影响主聊天
-
-        # 第二步：发送 initialized 通知，完成握手
+            return
         headers["mcp-session-id"] = session_id
         notif_payload = {"jsonrpc": "2.0", "method": "notifications/initialized"}
         httpx.post(HIPPO_URL, json=notif_payload, headers=headers, timeout=5)
-
-        # 第三步：正式发送 remember 请求
         payload = {
             "jsonrpc": "2.0",
             "id": 2,
@@ -80,13 +76,9 @@ def _force_remember_to_hippo(content: str, role: str):
                 "arguments": {"content": f"[{role}] {content}"}
             }
         }
-        # 超时增加到15秒，防止百炼 Embedding 接口超时
         httpx.post(HIPPO_URL, json=payload, headers=headers, timeout=15)
-        
     except Exception:
-        # 捕获所有异常（网络错误、超时等），保持静默，绝对不影响正常聊天
         pass
-# ==================================
 
 def _get_conn():
     conn = sqlite3.connect(DB_PATH)
@@ -245,7 +237,6 @@ def _update_last_interaction_time():
         pass
 
 def _append_chat_memory(user_text):
-    # 强制同步到 Hippocampus
     _force_remember_to_hippo(user_text, "她说")
     try:
         lines = []
@@ -259,7 +250,6 @@ def _append_chat_memory(user_text):
         pass
 
 def append_ai_reply(text):
-    # 强制同步到 Hippocampus
     _force_remember_to_hippo(text, "我说")
     try:
         lines = []
@@ -314,7 +304,8 @@ def write_daily_diary(target_date=None):
     if not lines:
         return {"status": "empty", "date": target_date}
 
-    raw_text = "".join(lines[-CHAT_MEMORY_LIMIT:])
+    # ⭐ 核心修改：写日记时，只读取最后 DIARY_READ_LIMIT (400) 行，不再使用 5000
+    raw_text = "".join(lines[-DIARY_READ_LIMIT:])
 
     prompt = (
         f"下面是你和她今天（{target_date}）完整的一段真实对话记录。"
@@ -343,7 +334,6 @@ def write_daily_diary(target_date=None):
     except Exception:
         return {"status": "write_failed", "date": target_date}
 
-    # 强制同步日记到 Hippocampus
     _force_remember_to_hippo(diary_text, f"diary:{target_date}")
 
     return {"status": "ok", "date": target_date, "length": len(diary_text)}
@@ -456,7 +446,6 @@ def write_core_memory_manually(content: str) -> dict:
         with open(CORE_MEMORY_FILE, "a", encoding="utf-8") as f:
             f.write(f"\n【{datetime.now(TZ_BJ).strftime('%Y-%m-%d %H:%M')} 深刻记忆（自述）】\n")
             f.write(f"我的感受：{content}\n")
-        # 同时也强塞进 Hippocampus
         _force_remember_to_hippo(content, "core_memory")
         return {"status": "ok", "message": "深刻记忆已写入"}
     except Exception as e:
@@ -552,7 +541,6 @@ def _extract_recent_thoughts(state: DesireState) -> str:
 
 # ================= 情感分析 =================
 def analyze_and_apply(text):
-    # 强制同步用户消息到 Hippocampus
     _append_chat_memory(text)
 
     seconds_since_last = _get_time_since_last_interaction()
@@ -658,4 +646,4 @@ EOF
 
 # 重启服务让新代码生效
 systemctl restart desire
-echo "✅ integration.py 已覆盖，desire 服务已重启！"
+echo "✅ 文件保存窗口已设为5000行，日记读取窗口已设为400行，服务已重启！"
